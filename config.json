@@ -1,0 +1,47 @@
+{
+  "concurrency": 10,
+  "db_conn_str": "user:password@tcp(127.0.0.1:3306)/testdb?parseTime=true",
+  "use_transaction": true,
+  "templates": [
+    {
+      "sql": "CREATE TABLE IF NOT EXISTS table1 (id INT PRIMARY KEY, name VARCHAR(255))",
+      "params": []
+    },
+    {
+      "sql": "INSERT INTO table1 (id, name) VALUES (?, ?)",
+      "params": [
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 100000
+        },
+        {
+          "type": "string",
+          "random_mode": "number_format",
+          "format": "user_%d",
+          "number_config": {
+            "random_mode": "uniform",
+            "min": 1,
+            "max": 1000
+          }
+        }
+      ]
+    },
+    {
+      "sql": "SELECT id FROM table1 WHERE id IN (?)",
+      "params": [
+        {
+          "type": "array",
+          "array_size": 5,
+          "element_type": "number",
+          "element_config": {
+            "random_mode": "uniform",
+            "min": 1,
+            "max": 100000
+          }
+        }
+      ]
+    }
+  ]
+}

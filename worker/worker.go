@@ -1,0 +1,151 @@
+package worker
+
+import (
+	"context"
+	"database/sql"
+	"database_workload/config"
+	"database_workload/generator"
+	"log"
+	"strings"
+
+	_ "github.com/go-sql-driver/mysql"
+)
+
+// Worker executes workloads.
+type Worker struct {
+	id          int
+	dbConnStr   string
+	templates   []config.Template
+	generators  [][]generator.Generator
+	useTX       bool
+}
+
+// New creates a new Worker.
+func New(id int, cfg *config.Config) (*Worker, error) {
+	gens := make([][]generator.Generator, len(cfg.Templates))
+	for i, tmpl := range cfg.Templates {
+		gens[i] = make([]generator.Generator, len(tmpl.Params))
+		for j, param := range tmpl.Params {
+			// Make a copy of the param to avoid issues with pointers
+			p := param
+			g, err := generator.New(&p)
+			if err != nil {
+				return nil, err
+			}
+			gens[i][j] = g
+		}
+	}
+
+	return &Worker{
+		id:          id,
+		dbConnStr:   cfg.DBConnStr,
+		templates:   cfg.Templates,
+		generators:  gens,
+		useTX:       cfg.UseTransaction,
+	}, nil
+}
+
+// Run starts the worker's loop. It stops when the context is cancelled.
+func (w *Worker) Run(ctx context.Context) {
+	log.Printf("Worker %d started", w.id)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("Worker %d stopping", w.id)
+			return
+		default:
+			w.runSession(ctx)
+		}
+	}
+}
+
+func (w *Worker) runSession(ctx context.Context) {
+	db, err := sql.Open("mysql", w.dbConnStr)
+	if err != nil {
+		log.Printf("Worker %d: ERROR failed to open DB connection: %v", w.id, err)
+		return
+	}
+	defer db.Close()
+
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(0)
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		log.Printf("Worker %d: ERROR failed to get DB connection: %v", w.id, err)
+		return
+	}
+	defer conn.Close()
+
+	var tx *sql.Tx
+	if w.useTX {
+		tx, err = conn.BeginTx(ctx, nil)
+		if err != nil {
+			log.Printf("Worker %d: ERROR failed to begin transaction: %v", w.id, err)
+			return
+		}
+	}
+
+	for i, tmpl := range w.templates {
+		args := make([]interface{}, len(tmpl.Params))
+		for j, gen := range w.generators[i] {
+			args[j] = gen.Generate()
+		}
+
+		finalSQL, finalArgs := handleArrayParams(tmpl.SQL, args)
+
+		if w.useTX {
+			_, err = tx.ExecContext(ctx, finalSQL, finalArgs...)
+		} else {
+			_, err = conn.ExecContext(ctx, finalSQL, finalArgs...)
+		}
+
+		if err != nil {
+			log.Printf("Worker %d: ERROR failed to execute query: %v", w.id, err)
+			if w.useTX {
+				_ = tx.Rollback()
+			}
+			return
+		}
+	}
+
+	if w.useTX {
+		if err := tx.Commit(); err != nil {
+			log.Printf("Worker %d: ERROR failed to commit transaction: %v", w.id, err)
+		}
+	}
+}
+
+func handleArrayParams(sql string, args []interface{}) (string, []interface{}) {
+	finalSQL := ""
+	sqlParts := strings.Split(sql, "?")
+
+	if len(sqlParts)-1 != len(args) {
+		return sql, args
+	}
+
+	newArgs := make([]interface{}, 0, len(args))
+	for i, arg := range args {
+		finalSQL += sqlParts[i]
+		arr, ok := arg.([]interface{})
+		if ok {
+			if len(arr) == 0 {
+				// Handle empty array case, maybe return an error or a specific SQL syntax
+				// For now, we just add a single NULL placeholder to avoid syntax errors.
+				finalSQL += "?"
+				newArgs = append(newArgs, nil)
+				continue
+			}
+			placeholders := strings.Repeat("?,", len(arr))
+			placeholders = strings.TrimSuffix(placeholders, ",")
+			finalSQL += placeholders
+			newArgs = append(newArgs, arr...)
+		} else {
+			finalSQL += "?"
+			newArgs = append(newArgs, arg)
+		}
+	}
+	finalSQL += sqlParts[len(sqlParts)-1]
+
+	return finalSQL, newArgs
+}
