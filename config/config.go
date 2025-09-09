@@ -9,6 +9,7 @@ import (
 type Config struct {
 	Concurrency    int        `json:"concurrency"`
 	DBConnStr      string     `json:"db_conn_str"`
+	ConnectionType string     `json:"connection_type,omitempty"`
 	UseTransaction bool       `json:"use_transaction"`
 	Templates      []Template `json:"templates"`
 }

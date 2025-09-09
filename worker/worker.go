@@ -7,6 +7,7 @@ import (
 	"database_workload/generator"
 	"log"
 	"strings"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -36,14 +37,31 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 			gens[i][j] = g
 		}
 	}
-	db, err := sql.Open("mysql", cfg.DBConnStr)
-	if err != nil {
-		log.Printf("Worker %d: ERROR failed to open DB connection: %v", id, err)
-		return nil, err
-	}
 
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(0)
+	var db *sql.DB
+	var err error
+
+	if cfg.ConnectionType == "short" {
+		// Short-lived connections: force tcp-reuse and no idle connections.
+		dsn := strings.Replace(cfg.DBConnStr, "tcp(", "tcp-reuse(", 1)
+		db, err = sql.Open("mysql", dsn)
+		if err != nil {
+			log.Printf("Worker %d: ERROR failed to open DB connection: %v", id, err)
+			return nil, err
+		}
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(0)
+	} else {
+		// Default to long-lived connections with a pool of 1.
+		db, err = sql.Open("mysql", cfg.DBConnStr)
+		if err != nil {
+			log.Printf("Worker %d: ERROR failed to open DB connection: %v", id, err)
+			return nil, err
+		}
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		db.SetConnMaxLifetime(5 * time.Minute)
+	}
 
 	return &Worker{
 		id:         id,
