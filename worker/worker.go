@@ -13,11 +13,12 @@ import (
 
 // Worker executes workloads.
 type Worker struct {
-	id          int
-	dbConnStr   string
-	templates   []config.Template
-	generators  [][]generator.Generator
-	useTX       bool
+	id         int
+	dbConnStr  string
+	templates  []config.Template
+	generators [][]generator.Generator
+	useTX      bool
+	db         *sql.DB
 }
 
 // New creates a new Worker.
@@ -35,13 +36,22 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 			gens[i][j] = g
 		}
 	}
+	db, err := sql.Open("mysql", cfg.DBConnStr)
+	if err != nil {
+		log.Printf("Worker %d: ERROR failed to open DB connection: %v", id, err)
+		return nil, err
+	}
+
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(0)
 
 	return &Worker{
-		id:          id,
-		dbConnStr:   cfg.DBConnStr,
-		templates:   cfg.Templates,
-		generators:  gens,
-		useTX:       cfg.UseTransaction,
+		id:         id,
+		dbConnStr:  cfg.DBConnStr,
+		templates:  cfg.Templates,
+		generators: gens,
+		useTX:      cfg.UseTransaction,
+		db:         db,
 	}, nil
 }
 
@@ -60,17 +70,7 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) runSession(ctx context.Context) {
-	db, err := sql.Open("mysql", w.dbConnStr)
-	if err != nil {
-		log.Printf("Worker %d: ERROR failed to open DB connection: %v", w.id, err)
-		return
-	}
-	defer db.Close()
-
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(0)
-
-	conn, err := db.Conn(ctx)
+	conn, err := w.db.Conn(ctx)
 	if err != nil {
 		log.Printf("Worker %d: ERROR failed to get DB connection: %v", w.id, err)
 		return
