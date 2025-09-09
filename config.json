@@ -1,6 +1,6 @@
 {
   "concurrency": 10,
-  "db_conn_str": "root:@tcp-reuse(127.0.0.1:4000)/test?parseTime=true",
+  "db_conn_str": "root:@tcp(127.0.0.1:4000)/test?parseTime=true",
   "use_transaction": true,
   "connection_type": "long",
   "templates": [
