@@ -139,14 +139,34 @@ database_workload -config config.json
 ### 1. 数字生成器
 
 ```json
+```json
 {
   "type": "number",
-  "random_mode": "uniform",     // "uniform"(均匀), "power_law"(幂律), "partitioned"(分区)
+  "random_mode": "uniform",
   "min": 1,
-  "max": 1000000,
-  "alpha": 2.0                  // 用于幂律分布
+  "max": 1000000
 }
 ```
+```json
+{
+  "type": "number",
+  "random_mode": "power_law",
+  "min": 1,
+  "max": 1000000,
+  "exponent": 1.01  // for power_law distribution
+}
+```
+```json
+{
+  "type": "number",
+  "random_mode": "partition_power_law",
+  "min": 1,
+  "max": 1000000,
+  "exponent": 1.01,  // for power_law distribution in one partition
+  "partition": 100   // number of partitions
+}
+```
+
 
 ### 2. 字符串生成器
 
@@ -158,6 +178,20 @@ database_workload -config config.json
   "values": {
     "value1": 0.7,
     "value2": 0.3
+  }
+}
+```
+```json
+{
+  "type": "string",
+  "random_mode": "number_format",
+  "format": "abc_%d",
+  "number_config": {
+    "random_mode": "partition_power_law",
+    "min": 1,
+    "max": 100000000,
+    "exponent": 1.001,
+    "partition": 2000
   }
 }
 ```
@@ -197,16 +231,16 @@ database_workload -config config.json
     "array_size": 4,
     "element_type": "string",
     "element_config": {
-    "type": "string",
-    "random_mode": "number_format",
-    "format": "abc_%d",
-    "number_config": {
-        "random_mode": "partition_power_law",
-        "min": 1,
-        "max": 100000000,
-        "exponent": 1.001,
-        "partition": 2000
-    }
+      "type": "string",
+      "random_mode": "number_format",
+      "format": "abc_%d",
+      "number_config": {
+          "random_mode": "partition_power_law",
+          "min": 1,
+          "max": 100000000,
+          "exponent": 1.001,
+          "partition": 2000
+      }
     }
 }
 ```

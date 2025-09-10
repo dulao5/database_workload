@@ -136,10 +136,28 @@ database_workload -config config.json
 ```json
 {
   "type": "number",
-  "random_mode": "uniform",     // "uniform", "power_law", "partitioned"
+  "random_mode": "uniform",
+  "min": 1,
+  "max": 1000000
+}
+```
+```json
+{
+  "type": "number",
+  "random_mode": "power_law",
   "min": 1,
   "max": 1000000,
-  "alpha": 2.0                  // for power_law distribution
+  "exponent": 1.01  // for power_law distribution
+}
+```
+```json
+{
+  "type": "number",
+  "random_mode": "partition_power_law",
+  "min": 1,
+  "max": 1000000,
+  "exponent": 1.01,  // for power_law distribution in one partition
+  "partition": 100   // number of partitions
 }
 ```
 
@@ -152,6 +170,20 @@ database_workload -config config.json
   "values": {
     "value1": 0.7,
     "value2": 0.3
+  }
+}
+```
+```json
+{
+  "type": "string",
+  "random_mode": "number_format",
+  "format": "abc_%d",
+  "number_config": {
+    "random_mode": "partition_power_law",
+    "min": 1,
+    "max": 100000000,
+    "exponent": 1.001,
+    "partition": 2000
   }
 }
 ```
@@ -190,16 +222,34 @@ database_workload -config config.json
     "array_size": 4,
     "element_type": "string",
     "element_config": {
-    "type": "string",
-    "random_mode": "number_format",
-    "format": "abc_%d",
-    "number_config": {
-        "random_mode": "partition_power_law",
-        "min": 1,
-        "max": 100000000,
-        "exponent": 1.001,
-        "partition": 2000
-    }
+        "type": "string",
+        "random_mode": "number_format",
+        "format": "abc_%d",
+        "number_config": {
+            "random_mode": "partition_power_law",
+            "min": 1,
+            "max": 100000000,
+            "exponent": 1.001,
+            "partition": 2000
+        }
     }
 }
+```
+
+## OS Tuning (for high QPS scenario when connection_type is "short")
+```
+sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+sysctl -w net.ipv4.tcp_tw_reuse=1
+sysctl -w net.ipv4.tcp_fin_timeout=10
+sysctl -w net.netfilter.nf_conntrack_max=1048576
+sysctl -w net.netfilter.nf_conntrack_buckets=262144
+
+ulimit -n 1048576
+echo "* soft nofile 1048576" >> /etc/security/limits.conf
+echo "* hard nofile 1048576" >> /etc/security/limits.conf
+
+# append to /etc/systemd/system.conf and /etc/systemd/user.conf
+DefaultLimitNOFILE=1048576
+# restart  systemd-logind：
+systemctl restart systemd-logind
 ```
