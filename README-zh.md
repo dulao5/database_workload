@@ -101,6 +101,28 @@
           }
         }
       ]
+    },
+    {
+      "sql": "SELECT * FROM sbtest1 WHERE c in (?)",
+      "params": [
+        {
+          "type": "array",
+          "array_size": 4,
+          "element_type": "string",
+          "element_config": {
+            "type": "string",
+            "random_mode": "number_format",
+            "format": "abc_%d",
+            "number_config": {
+              "random_mode": "partition_power_law",
+              "min": 1,
+              "max": 100000000,
+              "exponent": 1.001,
+              "partition": 2000
+            }
+          }
+        }
+      ]
     }
   ]
 }
@@ -166,5 +188,25 @@ database_workload -config config.json
     "exponent": 1.001,
     "partition": 2000
   }
+}
+```
+5. **数组生成器(随机数字的格式化字符串)**:
+```json
+{
+    "type": "array",
+    "array_size": 4,
+    "element_type": "string",
+    "element_config": {
+    "type": "string",
+    "random_mode": "number_format",
+    "format": "abc_%d",
+    "number_config": {
+        "random_mode": "partition_power_law",
+        "min": 1,
+        "max": 100000000,
+        "exponent": 1.001,
+        "partition": 2000
+    }
+    }
 }
 ```
