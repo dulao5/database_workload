@@ -8,8 +8,6 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-// init registers a custom dialer that sets SO_REUSEADDR and SO_REUSEPORT.
-// This allows for rapid connection cycling without exhausting ephemeral ports.
 func init() {
 	dialer := &net.Dialer{
 		// The Control function is called after creating the network
@@ -22,14 +20,15 @@ func init() {
 				if soErr != nil {
 					return
 				}
-				// Set SO_REUSEPORT to allow multiple sockets to bind to the same address and port.
-				// This is particularly useful for client-side dialing to scale.
-				soErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEPORT, 1)
-				if soErr != nil {
-					return
-				}
-				// Set SO_LINGER to 0 to avoid TIME_WAIT state by sending RST on close.
-				soErr = syscall.SetsockoptLinger(int(fd), syscall.SOL_SOCKET, syscall.SO_LINGER, &syscall.Linger{Onoff: 1, Linger: 0})
+
+                // Apply OS-specific socket options
+                soErr = applyOSSpecificSocketOptions(fd)
+                if soErr != nil {
+                    return
+                }
+
+                // Set SO_LINGER to 0 to avoid TIME_WAIT state by sending RST on close.
+                soErr = syscall.SetsockoptLinger(int(fd), syscall.SOL_SOCKET, syscall.SO_LINGER, &syscall.Linger{Onoff: 1, Linger: 0})
 			})
 			if err != nil {
 				return err
