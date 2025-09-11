@@ -3,9 +3,9 @@
 
 package worker
 
-import "syscall"
+// import "syscall"
 
 func applyOSSpecificSocketOptions(fd uintptr) error {
-	// Set SO_REUSEPORT on Linux
-	return syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEPORT, 1)
+	// No OS-specific socket options for Linux, relying on SO_LINGER in dialer_base.go
+	return nil
 }

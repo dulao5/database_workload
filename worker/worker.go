@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"database_workload/config"
 	"database_workload/generator"
+
+	// "fmt"
 	"log"
 	"strings"
 	"time"
@@ -165,5 +167,6 @@ func handleArrayParams(sql string, args []interface{}) (string, []interface{}) {
 	}
 	finalSQL += sqlParts[len(sqlParts)-1]
 
+	// fmt.Println(finalSQL, newArgs) // Debug print
 	return finalSQL, newArgs
 }
