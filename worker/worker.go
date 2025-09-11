@@ -114,14 +114,33 @@ func (w *Worker) runSession(ctx context.Context) {
 
 		finalSQL, finalArgs := handleArrayParams(tmpl.SQL, args)
 
-		if w.useTX {
-			_, err = tx.ExecContext(ctx, finalSQL, finalArgs...)
+		isSelect := strings.HasPrefix(strings.TrimSpace(strings.ToUpper(finalSQL)), "SELECT")
+
+		if isSelect {
+			var rows *sql.Rows
+			if w.useTX {
+				rows, err = tx.QueryContext(ctx, finalSQL, finalArgs...)
+			} else {
+				rows, err = conn.QueryContext(ctx, finalSQL, finalArgs...)
+			}
+
+			if err == nil {
+				// read all result data for "connection reset by peer"
+				for rows.Next() {
+				}
+				err = rows.Err() // 检查遍历过程中是否出错
+				rows.Close()
+			}
 		} else {
-			_, err = conn.ExecContext(ctx, finalSQL, finalArgs...)
+			if w.useTX {
+				_, err = tx.ExecContext(ctx, finalSQL, finalArgs...)
+			} else {
+				_, err = conn.ExecContext(ctx, finalSQL, finalArgs...)
+			}
 		}
 
 		if err != nil {
-			log.Printf("Worker %d: ERROR failed to execute query: %v", w.id, err)
+			log.Printf("Worker %d: ERROR failed to execute query or iterate rows: %v", w.id, err)
 			if w.useTX {
 				_ = tx.Rollback()
 			}
