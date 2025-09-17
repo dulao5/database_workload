@@ -92,7 +92,7 @@ func (w *Worker) Run(ctx context.Context) {
 			return
 		default:
 			w.runSession(ctx)
-			if rateLimiter == nil {
+			if rateLimiter != nil {
 				<-rateLimiter.C
 			}
 		}
