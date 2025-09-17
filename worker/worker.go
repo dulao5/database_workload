@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database_workload/config"
 	"database_workload/generator"
+	"fmt"
 
 	// "fmt"
 	"log"
@@ -80,11 +81,14 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 // Run starts the worker's loop. It stops when the context is cancelled.
 func (w *Worker) Run(ctx context.Context) {
 	var rateLimiter *time.Ticker
+	rateExplain := "no limit"
 	if w.rate > 0 {
 		rateLimiter = time.NewTicker(time.Second / time.Duration(w.rate))
+		defer rateLimiter.Stop()
+		rateExplain = fmt.Sprintf("%d TPS", w.rate)
 	}
-	log.Printf("Worker %d started, rate: %d", w.id, w.rate)
-	defer rateLimiter.Stop()
+
+	log.Printf("Worker %d started, rate: %s", w.id, rateExplain)
 	for {
 		select {
 		case <-ctx.Done():
