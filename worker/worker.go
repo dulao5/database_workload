@@ -21,6 +21,7 @@ type Worker struct {
 	templates  []config.Template
 	generators [][]generator.Generator
 	useTX      bool
+	rate       int
 	db         *sql.DB
 }
 
@@ -71,13 +72,19 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 		templates:  cfg.Templates,
 		generators: gens,
 		useTX:      cfg.UseTransaction,
+		rate:       cfg.RatePerThread,
 		db:         db,
 	}, nil
 }
 
 // Run starts the worker's loop. It stops when the context is cancelled.
 func (w *Worker) Run(ctx context.Context) {
-	log.Printf("Worker %d started", w.id)
+	var rateLimiter *time.Ticker
+	if w.rate > 0 {
+		rateLimiter = time.NewTicker(time.Second / time.Duration(w.rate))
+	}
+	log.Printf("Worker %d started, rate: %d", w.id, w.rate)
+	defer rateLimiter.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -85,6 +92,9 @@ func (w *Worker) Run(ctx context.Context) {
 			return
 		default:
 			w.runSession(ctx)
+			if rateLimiter == nil {
+				<-rateLimiter.C
+			}
 		}
 	}
 }
