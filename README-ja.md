@@ -28,6 +28,7 @@
 ```json
 {
   "concurrency": 10,
+  "rate_per_thread": 100,
   "db_conn_str": "user:password@tcp(127.0.0.1:4000)/dbname?parseTime=true",
   "use_transaction": true,
   "connection_type": "long",

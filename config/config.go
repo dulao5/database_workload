@@ -8,6 +8,7 @@ import (
 // Config is the main configuration structure
 type Config struct {
 	Concurrency    int        `json:"concurrency"`
+	RatePerThread  int        `json:"rate_per_thread"`
 	DBConnStr      string     `json:"db_conn_str"`
 	ConnectionType string     `json:"connection_type,omitempty"`
 	UseTransaction bool       `json:"use_transaction"`
@@ -22,8 +23,8 @@ type Template struct {
 
 // Param represents a parameter for a SQL query
 type Param struct {
-	Type        string      `json:"type"`
-	RandomMode  string      `json:"random_mode"`
+	Type       string `json:"type"`
+	RandomMode string `json:"random_mode"`
 
 	// Number
 	Min       *int64   `json:"min,omitempty"`

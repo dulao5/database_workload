@@ -6,7 +6,7 @@ import (
 	"database_workload/config"
 	"database_workload/generator"
 
-	// "fmt"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -21,6 +21,7 @@ type Worker struct {
 	templates  []config.Template
 	generators [][]generator.Generator
 	useTX      bool
+	rate       int
 	db         *sql.DB
 }
 
@@ -71,13 +72,22 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 		templates:  cfg.Templates,
 		generators: gens,
 		useTX:      cfg.UseTransaction,
+		rate:       cfg.RatePerThread,
 		db:         db,
 	}, nil
 }
 
 // Run starts the worker's loop. It stops when the context is cancelled.
 func (w *Worker) Run(ctx context.Context) {
-	log.Printf("Worker %d started", w.id)
+	var rateLimiter *time.Ticker
+	rateExplain := "no limit"
+	if w.rate > 0 {
+		rateLimiter = time.NewTicker(time.Second / time.Duration(w.rate))
+		defer rateLimiter.Stop()
+		rateExplain = fmt.Sprintf("%d TPS", w.rate)
+	}
+
+	log.Printf("Worker %d started, rate: %s", w.id, rateExplain)
 	for {
 		select {
 		case <-ctx.Done():
@@ -85,6 +95,9 @@ func (w *Worker) Run(ctx context.Context) {
 			return
 		default:
 			w.runSession(ctx)
+			if rateLimiter != nil {
+				<-rateLimiter.C
+			}
 		}
 	}
 }
