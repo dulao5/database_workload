@@ -5,9 +5,8 @@ import (
 	"database/sql"
 	"database_workload/config"
 	"database_workload/generator"
-	"fmt"
 
-	// "fmt"
+	"fmt"
 	"log"
 	"strings"
 	"time"
