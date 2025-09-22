@@ -128,7 +128,6 @@ func (g *PartitionedPowerLawGenerator) Generate() interface{} {
 	if partMin > partMax {
 		partMin = partMax
 	}
-	fmt.Println("min, max", partMin, partMax)
 	gen, err := newPowerLawGenerator(partMin, partMax, g.exponent)
 	if err != nil {
 		// Fallback to uniform on error
