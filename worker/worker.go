@@ -8,6 +8,7 @@ import (
 
 	"fmt"
 	"log"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -79,6 +80,12 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 
 // Run starts the worker's loop. It stops when the context is cancelled.
 func (w *Worker) Run(ctx context.Context) {
+	wait := time.Millisecond * time.Duration(100*rand.Float64())
+	if w.rate > 0 {
+		wait = time.Second / time.Duration(w.rate)
+		wait = time.Duration(float64(wait) * (rand.Float64()))
+	}
+	time.Sleep(wait)
 	var rateLimiter *time.Ticker
 	rateExplain := "no limit"
 	if w.rate > 0 {
