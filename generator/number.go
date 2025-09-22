@@ -68,14 +68,13 @@ func newPowerLawGenerator(min, max int64, exponent float64) (*PowerLawGenerator,
 		return nil, fmt.Errorf("exponent cannot be 1.0 for power law")
 	}
 	oneMinusAlpha := 1.0 - exponent
-	minF := float64(min)
 	maxF := float64(max)
 	return &PowerLawGenerator{
 		min:      min,
 		max:      max,
 		exponent: exponent,
-		c1:       math.Pow(minF, oneMinusAlpha),
-		c2:       math.Pow(maxF, oneMinusAlpha) - math.Pow(minF, oneMinusAlpha),
+		c1:       math.Pow(1, oneMinusAlpha),
+		c2:       math.Pow(maxF, oneMinusAlpha) - math.Pow(1, oneMinusAlpha),
 		c3:       1.0 / oneMinusAlpha,
 	}, nil
 }
@@ -83,7 +82,7 @@ func newPowerLawGenerator(min, max int64, exponent float64) (*PowerLawGenerator,
 func (g *PowerLawGenerator) Generate() interface{} {
 	y := rand.Float64()
 	val := math.Pow(y*g.c2+g.c1, g.c3)
-	result := int64(math.Round(val))
+	result := int64(math.Round(val)) + g.min - 1
 	if result < g.min {
 		return g.min
 	}
@@ -129,7 +128,6 @@ func (g *PartitionedPowerLawGenerator) Generate() interface{} {
 	if partMin > partMax {
 		partMin = partMax
 	}
-
 	gen, err := newPowerLawGenerator(partMin, partMax, g.exponent)
 	if err != nil {
 		// Fallback to uniform on error
