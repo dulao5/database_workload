@@ -54,6 +54,16 @@ Configure your workload in `config.json`:
           "start": "2023-01-01T00:00:00Z",
           "end": "2023-12-31T23:59:59Z",
           "format": "2006-01-02 15:04:05"
+        },
+        {
+          "type": "string",
+          "random_mode": "number_format",
+          "format": "tag_%d",
+          "number_config": {
+            "random_mode": "uniform",
+            "min": 1,
+            "max": 1000
+          }
         }
       ]
     },
