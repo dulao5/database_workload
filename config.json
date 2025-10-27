@@ -1,6 +1,6 @@
 {
   "concurrency": 10,
-  "db_conn_str": "root:@tcp(127.0.0.1:4000)/test?parseTime=true",
+  "db_conn_str": "root:@tcp(127.0.0.1:4000)/test?parseTime=true&interpolateParams=true&timeout=3s&readTimeout=3s&writeTimeout=3s",
   "use_transaction": true,
   "connection_type": "long",
   "templates": [
