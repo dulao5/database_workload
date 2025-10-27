@@ -127,44 +127,47 @@ func (w *Worker) runSession(ctx context.Context) {
 	}
 
 	for i, tmpl := range w.templates {
-		args := make([]interface{}, len(tmpl.Params))
-		for j, gen := range w.generators[i] {
-			args[j] = gen.Generate()
-		}
+		repeatTimes := tmpl.GetRepeat()
+		for r := 0; r < repeatTimes; r++ {
 
-		finalSQL, finalArgs := handleArrayParams(tmpl.SQL, args)
-
-		isSelect := strings.HasPrefix(strings.TrimSpace(strings.ToUpper(finalSQL)), "SELECT")
-
-		if isSelect {
-			var rows *sql.Rows
-			if w.useTX {
-				rows, err = tx.QueryContext(ctx, finalSQL, finalArgs...)
-			} else {
-				rows, err = conn.QueryContext(ctx, finalSQL, finalArgs...)
+			args := make([]interface{}, len(tmpl.Params))
+			for j, gen := range w.generators[i] {
+				args[j] = gen.Generate()
 			}
 
-			if err == nil {
-				// read all result data for "connection reset by peer"
-				for rows.Next() {
+			finalSQL, finalArgs := handleArrayParams(tmpl.SQL, args)
+
+			isSelect := strings.HasPrefix(strings.TrimSpace(strings.ToUpper(finalSQL)), "SELECT")
+
+			if isSelect {
+				var rows *sql.Rows
+				if w.useTX {
+					rows, err = tx.QueryContext(ctx, finalSQL, finalArgs...)
+				} else {
+					rows, err = conn.QueryContext(ctx, finalSQL, finalArgs...)
 				}
-				err = rows.Err() // 检查遍历过程中是否出错
-				rows.Close()
-			}
-		} else {
-			if w.useTX {
-				_, err = tx.ExecContext(ctx, finalSQL, finalArgs...)
-			} else {
-				_, err = conn.ExecContext(ctx, finalSQL, finalArgs...)
-			}
-		}
 
-		if err != nil {
-			log.Printf("Worker %d: ERROR failed to execute query or iterate rows: %v", w.id, err)
-			if w.useTX {
-				_ = tx.Rollback()
+				if err == nil {
+					// read all result data to fix "connection reset by peer" error
+					for rows.Next() {
+					}
+					err = rows.Err()
+					rows.Close()
+				}
+			} else {
+				if w.useTX {
+					_, err = tx.ExecContext(ctx, finalSQL, finalArgs...)
+				} else {
+					_, err = conn.ExecContext(ctx, finalSQL, finalArgs...)
+				}
 			}
-			return
+			if err != nil {
+				log.Printf("Worker %d: ERROR failed to execute query or iterate rows: %v", w.id, err)
+				if w.useTX {
+					_ = tx.Rollback()
+				}
+				return
+			}
 		}
 	}
 

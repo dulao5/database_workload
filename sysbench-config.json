@@ -7,6 +7,7 @@
   "templates": [
     {
       "sql": "SELECT id from sbtest? WHERE id in (?)",
+      "repeat": 10,
       "params": [
         {
           "type": "number",

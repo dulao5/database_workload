@@ -19,6 +19,14 @@ type Config struct {
 type Template struct {
 	SQL    string  `json:"sql"`
 	Params []Param `json:"params"`
+	Repeat int     `json:"repeat,omitempty"`
+}
+
+func (t *Template) GetRepeat() int {
+	if t.Repeat <= 0 {
+		return 1
+	}
+	return t.Repeat
 }
 
 // Param represents a parameter for a SQL query
