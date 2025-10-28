@@ -12,6 +12,7 @@ const sampleConfig = `{
   "templates": [
     {
       "sql": "INSERT INTO table (id, name, value, created_at) VALUES (?, ?, ?, ?)",
+      "repeat": 1,
       "params": [
         {
           "type": "number",
@@ -48,6 +49,7 @@ const sampleConfig = `{
     },
     {
       "sql": "SELECT * FROM table WHERE category = ? AND id IN (?)",
+      "repeat": 1,
       "params": [
         {
           "type": "string",
