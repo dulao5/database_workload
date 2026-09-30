@@ -182,35 +182,46 @@ func splitLiteralAndBindArgs(sqlText string, params []config.Param, args []inter
 // freshly generated one — saving it into the right scope's variable store
 // if the param has SaveAs set.
 func (w *Worker) resolveArg(p *config.Param, gen generator.Generator, txVars map[string]interface{}) (interface{}, error) {
+	var val interface{}
+
 	if p.Type == "ref" {
 		name := ""
 		if p.RefName != nil {
 			name = *p.RefName
 		}
-		if v, ok := txVars[name]; ok {
-			return v, nil
+		v, ok := txVars[name]
+		if !ok {
+			v, ok = w.connVars[name]
 		}
-		if v, ok := w.connVars[name]; ok {
-			return v, nil
+		if !ok {
+			return nil, fmt.Errorf("session variable %q referenced before it was saved", name)
 		}
-		return nil, fmt.Errorf("session variable %q referenced before it was saved", name)
+		val = v
+	} else {
+		val = gen.Generate()
+
+		if p.SaveAs != nil {
+			name := *p.SaveAs
+			if p.ScopeOrDefault() == "connection" {
+				if existing, ok := w.connVars[name]; ok {
+					// Already generated earlier in this worker's lifetime;
+					// reuse it instead of the value just generated above.
+					val = existing
+				} else {
+					w.connVars[name] = val
+				}
+			} else {
+				txVars[name] = val
+			}
+		}
 	}
 
-	val := gen.Generate()
-
-	if p.SaveAs != nil {
-		name := *p.SaveAs
-		if p.ScopeOrDefault() == "connection" {
-			if existing, ok := w.connVars[name]; ok {
-				// Already generated earlier in this worker's lifetime;
-				// reuse it instead of the value just generated above.
-				val = existing
-			} else {
-				w.connVars[name] = val
-			}
-		} else {
-			txVars[name] = val
+	if p.Offset != nil {
+		n, ok := val.(int64)
+		if !ok {
+			return nil, fmt.Errorf("offset is only supported for int64 values, got %T", val)
 		}
+		val = n + *p.Offset
 	}
 
 	return val, nil
