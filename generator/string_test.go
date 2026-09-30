@@ -2,8 +2,43 @@ package generator
 
 import (
 	"database_workload/config"
+	"strings"
 	"testing"
 )
+
+func TestRandomStringGenerator(t *testing.T) {
+	length := 16
+	charset := "0123456789abcdef"
+	param := &config.Param{Type: "string", RandomMode: "random_string", Length: &length, Charset: &charset}
+	gen, err := New(param)
+	if err != nil {
+		t.Fatalf("failed to create generator: %v", err)
+	}
+
+	for i := 0; i < 100; i++ {
+		s := gen.Generate().(string)
+		if len(s) != length {
+			t.Fatalf("expected length %d, got %d: %q", length, len(s), s)
+		}
+		for _, r := range s {
+			if !strings.ContainsRune(charset, r) {
+				t.Fatalf("character %q not in charset %q", r, charset)
+			}
+		}
+	}
+}
+
+func TestRandomStringGenerator_DefaultCharset(t *testing.T) {
+	length := 8
+	param := &config.Param{Type: "string", RandomMode: "random_string", Length: &length}
+	gen, err := New(param)
+	if err != nil {
+		t.Fatalf("failed to create generator: %v", err)
+	}
+	if s := gen.Generate().(string); len(s) != length {
+		t.Fatalf("expected length %d, got %d: %q", length, len(s), s)
+	}
+}
 
 func TestStringNumberFormatGenerator(t *testing.T) {
 	min, max := int64(100), int64(100)

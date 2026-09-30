@@ -6,9 +6,20 @@ import (
 	"math/rand"
 )
 
+const defaultRandomStringCharset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
 // NewStringGenerator is a factory for creating string generators.
 func NewStringGenerator(p *config.Param) (Generator, error) {
 	switch p.RandomMode {
+	case "random_string":
+		if p.Length == nil || *p.Length <= 0 {
+			return nil, fmt.Errorf("random_string requires a positive length")
+		}
+		charset := defaultRandomStringCharset
+		if p.Charset != nil && *p.Charset != "" {
+			charset = *p.Charset
+		}
+		return newRandomStringGenerator(*p.Length, charset)
 	case "number_format":
 		if p.Format == nil || p.NumberConfig == nil {
 			return nil, fmt.Errorf("number_format requires format and number_config")
@@ -43,6 +54,28 @@ func NewStringGenerator(p *config.Param) (Generator, error) {
 	default:
 		return nil, fmt.Errorf("unknown string random_mode: %s", p.RandomMode)
 	}
+}
+
+// RandomStringGenerator generates a fixed-length string drawn from a charset.
+type RandomStringGenerator struct {
+	length  int
+	charset []rune
+}
+
+func newRandomStringGenerator(length int, charset string) (*RandomStringGenerator, error) {
+	runes := []rune(charset)
+	if len(runes) == 0 {
+		return nil, fmt.Errorf("random_string charset cannot be empty")
+	}
+	return &RandomStringGenerator{length: length, charset: runes}, nil
+}
+
+func (g *RandomStringGenerator) Generate() interface{} {
+	b := make([]rune, g.length)
+	for i := range b {
+		b[i] = g.charset[rand.Intn(len(g.charset))]
+	}
+	return string(b)
 }
 
 // NumberFormatGenerator generates a string by formatting a number.

@@ -50,6 +50,11 @@ type Param struct {
 	Format       *string `json:"format,omitempty"`
 	NumberConfig *Param  `json:"number_config,omitempty"`
 
+	// random_string: draws Length characters from Charset (defaults to
+	// mixed-case letters and digits if omitted).
+	Length  *int    `json:"length,omitempty"`
+	Charset *string `json:"charset,omitempty"`
+
 	// Set
 	SetMode *string     `json:"set_mode,omitempty"`
 	Values  interface{} `json:"values,omitempty"` // map[string]float64 or []string
@@ -79,6 +84,11 @@ type Param struct {
 	SaveAs  *string `json:"save_as,omitempty"`
 	Scope   *string `json:"scope,omitempty"`
 	RefName *string `json:"ref_name,omitempty"`
+
+	// Offset, if set, is added to this param's int64 value (fresh or
+	// looked up via ref) before it's used, e.g. a range query's upper
+	// bound = a saved lower bound + a fixed range size.
+	Offset *int64 `json:"offset,omitempty"`
 
 	// Literal marks this param's value to be substituted directly into the
 	// SQL text instead of bound as a "?" placeholder. Needed for
