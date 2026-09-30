@@ -7,13 +7,18 @@ import (
 
 // Config is the main configuration structure
 type Config struct {
-	Concurrency           int        `json:"concurrency"`
-	RatePerThread         int        `json:"rate_per_thread"`
-	DBConnStr             string     `json:"db_conn_str"`
-	ConnectionType        string     `json:"connection_type,omitempty"`
-	UseTransaction        bool       `json:"use_transaction"`
-	UsePreparedStatements bool       `json:"use_prepared_statements,omitempty"`
-	Templates             []Template `json:"templates"`
+	Concurrency           int    `json:"concurrency"`
+	RatePerThread         int    `json:"rate_per_thread"`
+	DBConnStr             string `json:"db_conn_str"`
+	ConnectionType        string `json:"connection_type,omitempty"`
+	UseTransaction        bool   `json:"use_transaction"`
+	UsePreparedStatements bool   `json:"use_prepared_statements,omitempty"`
+	// MultiStatements, when true, sends one whole transaction (every
+	// template/repeat's PREPARE+EXECUTE) as a single multi-statement round
+	// trip instead of one round trip per statement. Requires
+	// use_transaction and use_prepared_statements to both be true.
+	MultiStatements bool       `json:"multi_statements,omitempty"`
+	Templates       []Template `json:"templates"`
 }
 
 // Template represents a single SQL query template

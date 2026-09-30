@@ -124,6 +124,17 @@ conn.Close()
 }
 ```
 
+## Multi-Statement + Prepared（`multi-statements-prepared` 分支）
+
+配置 `"multi_statements": true`（要求 `use_transaction` 和 `use_prepared_statements` 也都是 `true`，否则报错拒绝启动）后，一个 session/transaction 内所有 template（含 `repeat`）会被拼成**一条**多语句 SQL 文本，一次性发给服务端（`begin; ...; commit;`），而不是每条语句各自一次网络往返。
+
+* 走的不是二进制协议的 `COM_STMT_EXECUTE`（MySQL wire protocol 不支持批量发送多个 `COM_STMT_EXECUTE` 不等回包），而是 SQL 级 `PREPARE ... FROM '...'` + `SET @v=...; EXECUTE ... USING @v;`——每个 template 的 SQL 形状只会在**整个 worker 生命周期内 PREPARE 一次**（第一次遇到时，连着这次事务一起发出去，不额外增加往返次数），之后所有事务都复用同一个 prepared name。
+* 会自动在 DSN 后面加上 `multiStatements=true`（driver 的 client capability flag），不需要手动改 `db_conn_str`。
+* `literal: true`的参数（比如按连接选定的随机表号）会在 PREPARE 之前就以字面量文本拼进 SQL，其余参数走 `SET @mv_xxx=<字面量值>; EXECUTE ... USING @mv_xxx;`。
+* 已用`tiup playground`实测验证：整个压测过程中每个 SQL 形状只 `PREPARE` 了一次（`grep PREPARE`在general log里只出现两次，对应两个template），后续所有事务都是`begin;SET ...;EXECUTE ...;...;commit;`一次性发送；同一个连接的transaction级随机变量（`save_as`不带`scope`）和connection级随机变量（`scope:"connection"`）都在这条路径下正确工作。
+
+对照实验建议：`multi_statements=off + use_prepared_statements=on` vs `multi_statements=on + use_prepared_statements=on`，其余配置(concurrency/rate/templates)保持一致，对比两者的往返次数/延迟/吞吐差异。
+
 # 5. 幂律分布算法
 
 使用真正的幂律分布算法：

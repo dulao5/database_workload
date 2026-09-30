@@ -1,0 +1,40 @@
+{
+  "concurrency": 40,
+  "db_conn_str": "root:@tcp(127.0.0.1:4000)/test?parseTime=true&timeout=3s&readTimeout=3s&writeTimeout=3s",
+  "use_transaction": true,
+  "use_prepared_statements": true,
+  "multi_statements": false,
+  "rate_per_thread": 1,
+  "connection_type": "long",
+  "templates": [
+    {
+      "sql": "",
+      "comment": "local-only: pick one random table number and keep it for the whole connection's lifetime, like sysbench's oltp-read-write does",
+      "params": [
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 40,
+          "save_as": "tableNum",
+          "scope": "connection",
+          "comment": "40 is the number of tables"
+        }
+      ]
+    },
+    {
+      "sql": "SELECT c from sbtest? WHERE id in (?)",
+      "repeat": 10,
+      "params": [
+        { "type": "ref", "ref_name": "tableNum", "literal": true, "comment": "table names can't be bind params, must be inlined before PREPARE" },
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 500000,
+          "comment": "500000 is the number of rows per table"
+        }
+      ]
+    }
+  ]
+}

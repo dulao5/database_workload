@@ -17,15 +17,23 @@ import (
 
 // Worker executes workloads.
 type Worker struct {
-	id          int
-	dbConnStr   string
-	templates   []config.Template
-	generators  [][]generator.Generator
-	useTX       bool
-	usePrepared bool
-	isShortConn bool
-	rate        int
-	db          *sql.DB
+	id              int
+	dbConnStr       string
+	templates       []config.Template
+	generators      [][]generator.Generator
+	useTX           bool
+	usePrepared     bool
+	multiStatements bool
+	isShortConn     bool
+	rate            int
+	db              *sql.DB
+
+	// multiStmtNames maps a rendered SQL shape to the SQL-level PREPARE
+	// name issued for it (e.g. "PREPARE ps1 FROM '...'"), so multi-statement
+	// mode only ever emits one PREPARE per shape per connection, same as
+	// stmtCache does for the binary-protocol path.
+	multiStmtNames map[string]string
+	multiStmtNext  int
 
 	// longConn is the one persistent *sql.Conn reused across every
 	// session/transaction when connection_type isn't "short". Prepared
@@ -72,9 +80,21 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 	var db *sql.DB
 	var err error
 
+	dbConnStr := cfg.DBConnStr
+	if cfg.MultiStatements {
+		// Required client capability flag for the driver to send a
+		// semicolon-separated batch as a single request instead of
+		// rejecting or splitting it.
+		if strings.Contains(dbConnStr, "?") {
+			dbConnStr += "&multiStatements=true"
+		} else {
+			dbConnStr += "?multiStatements=true"
+		}
+	}
+
 	if cfg.ConnectionType == "short" {
 		// Short-lived connections: force tcp-reuse and no idle connections.
-		dsn := strings.Replace(cfg.DBConnStr, "tcp(", "tcp-reuse(", 1)
+		dsn := strings.Replace(dbConnStr, "tcp(", "tcp-reuse(", 1)
 		db, err = sql.Open("mysql", dsn)
 		if err != nil {
 			log.Printf("Worker %d: ERROR failed to open DB connection: %v", id, err)
@@ -84,7 +104,7 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 		db.SetMaxIdleConns(0)
 	} else {
 		// Default to long-lived connections with a pool of 1.
-		db, err = sql.Open("mysql", cfg.DBConnStr)
+		db, err = sql.Open("mysql", dbConnStr)
 		if err != nil {
 			log.Printf("Worker %d: ERROR failed to open DB connection: %v", id, err)
 			return nil, err
@@ -94,18 +114,24 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 		db.SetConnMaxLifetime(5 * time.Minute)
 	}
 
+	if cfg.MultiStatements && (!cfg.UseTransaction || !cfg.UsePreparedStatements) {
+		return nil, fmt.Errorf("multi_statements requires use_transaction and use_prepared_statements to both be true")
+	}
+
 	return &Worker{
-		id:          id,
-		dbConnStr:   cfg.DBConnStr,
-		templates:   cfg.Templates,
-		generators:  gens,
-		useTX:       cfg.UseTransaction,
-		usePrepared: cfg.UsePreparedStatements,
-		isShortConn: cfg.ConnectionType == "short",
-		rate:        cfg.RatePerThread,
-		db:          db,
-		connVars:    make(map[string]interface{}),
-		stmtCache:   make(map[string]*sql.Stmt),
+		id:              id,
+		dbConnStr:       cfg.DBConnStr,
+		templates:       cfg.Templates,
+		generators:      gens,
+		useTX:           cfg.UseTransaction,
+		usePrepared:     cfg.UsePreparedStatements,
+		multiStatements: cfg.MultiStatements,
+		isShortConn:     cfg.ConnectionType == "short",
+		rate:            cfg.RatePerThread,
+		db:              db,
+		connVars:        make(map[string]interface{}),
+		stmtCache:       make(map[string]*sql.Stmt),
+		multiStmtNames:  make(map[string]string),
 	}, nil
 }
 
@@ -222,6 +248,11 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) runSession(ctx context.Context) {
+	if w.multiStatements {
+		w.runSessionMultiStatement(ctx)
+		return
+	}
+
 	conn, ownConn, err := w.acquireConn(ctx)
 	if err != nil {
 		log.Printf("Worker %d: ERROR failed to get DB connection: %v", w.id, err)
