@@ -17,19 +17,35 @@ import (
 
 // Worker executes workloads.
 type Worker struct {
-	id         int
-	dbConnStr  string
-	templates  []config.Template
-	generators [][]generator.Generator
-	useTX      bool
-	rate       int
-	db         *sql.DB
+	id          int
+	dbConnStr   string
+	templates   []config.Template
+	generators  [][]generator.Generator
+	useTX       bool
+	usePrepared bool
+	isShortConn bool
+	rate        int
+	db          *sql.DB
+
+	// longConn is the one persistent *sql.Conn reused across every
+	// session/transaction when connection_type isn't "short". Prepared
+	// statements are only valid for the specific *sql.Conn they were
+	// prepared on, so this worker must keep reusing the same Conn object
+	// (not just the same pooled DB) for stmtCache to actually save any
+	// COM_STMT_PREPARE round trips across transactions.
+	longConn *sql.Conn
 
 	// connVars holds "connection"-scoped session variables: generated once
 	// (the first time their defining param runs) and reused for the rest of
 	// this worker's lifetime, e.g. picking one random table per connection
 	// the way sysbench's oltp-read-write does.
 	connVars map[string]interface{}
+
+	// stmtCache holds prepared statements keyed by their fully-rendered SQL
+	// text (after literal substitutions and array expansion), so a
+	// template is only ever prepared once per underlying connection and
+	// reused (via tx.StmtContext) for as long as that connection lives.
+	stmtCache map[string]*sql.Stmt
 }
 
 // New creates a new Worker.
@@ -79,15 +95,60 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 	}
 
 	return &Worker{
-		id:         id,
-		dbConnStr:  cfg.DBConnStr,
-		templates:  cfg.Templates,
-		generators: gens,
-		useTX:      cfg.UseTransaction,
-		rate:       cfg.RatePerThread,
-		db:         db,
-		connVars:   make(map[string]interface{}),
+		id:          id,
+		dbConnStr:   cfg.DBConnStr,
+		templates:   cfg.Templates,
+		generators:  gens,
+		useTX:       cfg.UseTransaction,
+		usePrepared: cfg.UsePreparedStatements,
+		isShortConn: cfg.ConnectionType == "short",
+		rate:        cfg.RatePerThread,
+		db:          db,
+		connVars:    make(map[string]interface{}),
+		stmtCache:   make(map[string]*sql.Stmt),
 	}, nil
+}
+
+// getOrPrepareStmt returns a cached prepared statement for the given SQL
+// text, preparing it (once, on the given conn) on first use. Callers must
+// pass the exact *sql.Conn the statement will be run against: a prepared
+// statement is only valid on the connection it was prepared on.
+func (w *Worker) getOrPrepareStmt(ctx context.Context, conn *sql.Conn, sqlText string) (*sql.Stmt, error) {
+	if stmt, ok := w.stmtCache[sqlText]; ok {
+		return stmt, nil
+	}
+	stmt, err := conn.PrepareContext(ctx, sqlText)
+	if err != nil {
+		return nil, err
+	}
+	w.stmtCache[sqlText] = stmt
+	return stmt, nil
+}
+
+// splitLiteralAndBindArgs rewrites sqlText's "?" placeholders: params marked
+// Literal are substituted directly into the SQL text (needed for
+// identifier-position values like a table name suffix, which MySQL cannot
+// bind as a query parameter), while the rest stay as "?" and are returned as
+// bind args in order.
+func splitLiteralAndBindArgs(sqlText string, params []config.Param, args []interface{}) (string, []interface{}) {
+	sqlParts := strings.Split(sqlText, "?")
+	if len(sqlParts)-1 != len(args) {
+		return sqlText, args
+	}
+
+	var b strings.Builder
+	bindArgs := make([]interface{}, 0, len(args))
+	for i, arg := range args {
+		b.WriteString(sqlParts[i])
+		if params[i].IsLiteral() {
+			b.WriteString(fmt.Sprintf("%v", arg))
+		} else {
+			b.WriteString("?")
+			bindArgs = append(bindArgs, arg)
+		}
+	}
+	b.WriteString(sqlParts[len(sqlParts)-1])
+	return b.String(), bindArgs
 }
 
 // resolveArg produces the value to bind for a single param: either a fresh
@@ -161,18 +222,33 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) runSession(ctx context.Context) {
-	conn, err := w.db.Conn(ctx)
+	conn, ownConn, err := w.acquireConn(ctx)
 	if err != nil {
 		log.Printf("Worker %d: ERROR failed to get DB connection: %v", w.id, err)
 		return
 	}
-	defer conn.Close()
+	if ownConn {
+		defer conn.Close()
+	}
+
+	// If anything below fails, drop cached state tied to this connection:
+	// a broken connection also invalidates any prepared statements and
+	// (if this session owns a long-lived conn) the conn itself, so the
+	// next session starts clean instead of reusing something stale.
+	sessionFailed := false
+	defer func() {
+		if sessionFailed && !w.isShortConn {
+			w.longConn = nil
+			w.stmtCache = make(map[string]*sql.Stmt)
+		}
+	}()
 
 	var tx *sql.Tx
 	if w.useTX {
 		tx, err = conn.BeginTx(ctx, nil)
 		if err != nil {
 			log.Printf("Worker %d: ERROR failed to begin transaction: %v", w.id, err)
+			sessionFailed = true
 			return
 		}
 	}
@@ -195,6 +271,7 @@ func (w *Worker) runSession(ctx context.Context) {
 					if w.useTX {
 						_ = tx.Rollback()
 					}
+					sessionFailed = true
 					return
 				}
 				args[j] = v
@@ -206,11 +283,33 @@ func (w *Worker) runSession(ctx context.Context) {
 				continue
 			}
 
-			finalSQL, finalArgs := handleArrayParams(tmpl.SQL, args)
+			literalSQL, bindArgs := splitLiteralAndBindArgs(tmpl.SQL, tmpl.Params, args)
+			finalSQL, finalArgs := handleArrayParams(literalSQL, bindArgs)
 
 			isSelect := strings.HasPrefix(strings.TrimSpace(strings.ToUpper(finalSQL)), "SELECT")
 
-			if isSelect {
+			if w.usePrepared {
+				var stmt *sql.Stmt
+				stmt, err = w.getOrPrepareStmt(ctx, conn, finalSQL)
+				if err == nil {
+					runStmt := stmt
+					if w.useTX {
+						runStmt = tx.StmtContext(ctx, stmt)
+					}
+					if isSelect {
+						var rows *sql.Rows
+						rows, err = runStmt.QueryContext(ctx, finalArgs...)
+						if err == nil {
+							for rows.Next() {
+							}
+							err = rows.Err()
+							rows.Close()
+						}
+					} else {
+						_, err = runStmt.ExecContext(ctx, finalArgs...)
+					}
+				}
+			} else if isSelect {
 				var rows *sql.Rows
 				if w.useTX {
 					rows, err = tx.QueryContext(ctx, finalSQL, finalArgs...)
@@ -237,6 +336,7 @@ func (w *Worker) runSession(ctx context.Context) {
 				if w.useTX {
 					_ = tx.Rollback()
 				}
+				sessionFailed = true
 				return
 			}
 		}
@@ -245,8 +345,32 @@ func (w *Worker) runSession(ctx context.Context) {
 	if w.useTX {
 		if err := tx.Commit(); err != nil {
 			log.Printf("Worker %d: ERROR failed to commit transaction: %v", w.id, err)
+			sessionFailed = true
 		}
 	}
+}
+
+// acquireConn returns the *sql.Conn to use for this session, and whether
+// this call is responsible for closing it once the session is done.
+//
+// For connection_type "short" it always opens (and later closes) a fresh
+// connection, matching that mode's purpose. Otherwise it lazily acquires
+// one persistent *sql.Conn and keeps reusing it across every session, since
+// prepared statements are only valid on the specific *sql.Conn they were
+// prepared on.
+func (w *Worker) acquireConn(ctx context.Context) (*sql.Conn, bool, error) {
+	if w.isShortConn {
+		conn, err := w.db.Conn(ctx)
+		return conn, true, err
+	}
+	if w.longConn == nil {
+		conn, err := w.db.Conn(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		w.longConn = conn
+	}
+	return w.longConn, false, nil
 }
 
 func handleArrayParams(sql string, args []interface{}) (string, []interface{}) {

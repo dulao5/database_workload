@@ -7,12 +7,13 @@ import (
 
 // Config is the main configuration structure
 type Config struct {
-	Concurrency    int        `json:"concurrency"`
-	RatePerThread  int        `json:"rate_per_thread"`
-	DBConnStr      string     `json:"db_conn_str"`
-	ConnectionType string     `json:"connection_type,omitempty"`
-	UseTransaction bool       `json:"use_transaction"`
-	Templates      []Template `json:"templates"`
+	Concurrency           int        `json:"concurrency"`
+	RatePerThread         int        `json:"rate_per_thread"`
+	DBConnStr             string     `json:"db_conn_str"`
+	ConnectionType        string     `json:"connection_type,omitempty"`
+	UseTransaction        bool       `json:"use_transaction"`
+	UsePreparedStatements bool       `json:"use_prepared_statements,omitempty"`
+	Templates             []Template `json:"templates"`
 }
 
 // Template represents a single SQL query template
@@ -73,6 +74,19 @@ type Param struct {
 	SaveAs  *string `json:"save_as,omitempty"`
 	Scope   *string `json:"scope,omitempty"`
 	RefName *string `json:"ref_name,omitempty"`
+
+	// Literal marks this param's value to be substituted directly into the
+	// SQL text instead of bound as a "?" placeholder. Needed for
+	// identifier-position values (e.g. a table name suffix) once real
+	// server-side prepared statements are used: MySQL cannot bind a
+	// placeholder to a table/column name, only to a value position.
+	Literal *bool `json:"literal,omitempty"`
+}
+
+// IsLiteral reports whether this param should be substituted directly into
+// the SQL text rather than bound as a query parameter.
+func (p *Param) IsLiteral() bool {
+	return p.Literal != nil && *p.Literal
 }
 
 // ScopeOrDefault returns the effective scope for a param whose SaveAs is set.

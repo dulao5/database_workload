@@ -109,3 +109,34 @@ func TestResolveArg_RefBeforeSaveIsAnError(t *testing.T) {
 		t.Fatalf("expected an error when referencing a variable that was never saved")
 	}
 }
+
+func TestSplitLiteralAndBindArgs_NoLiteralsIsUnchanged(t *testing.T) {
+	sql := "SELECT c FROM t WHERE id = ? AND name = ?"
+	params := []config.Param{{Type: "number"}, {Type: "string"}}
+	args := []interface{}{1, "a"}
+
+	gotSQL, gotArgs := splitLiteralAndBindArgs(sql, params, args)
+	if gotSQL != sql {
+		t.Fatalf("expected sql unchanged, got %q", gotSQL)
+	}
+	if len(gotArgs) != 2 || gotArgs[0] != 1 || gotArgs[1] != "a" {
+		t.Fatalf("expected all args to remain bind args, got %v", gotArgs)
+	}
+}
+
+func TestSplitLiteralAndBindArgs_LiteralSubstitutesIntoSQL(t *testing.T) {
+	sql := "SELECT c FROM sbtest? WHERE id = ?"
+	params := []config.Param{
+		{Type: "ref", RefName: ptr("tableNum"), Literal: ptr(true)},
+		{Type: "number"},
+	}
+	args := []interface{}{3, 42}
+
+	gotSQL, gotArgs := splitLiteralAndBindArgs(sql, params, args)
+	if gotSQL != "SELECT c FROM sbtest3 WHERE id = ?" {
+		t.Fatalf("expected table number inlined into the SQL, got %q", gotSQL)
+	}
+	if len(gotArgs) != 1 || gotArgs[0] != 42 {
+		t.Fatalf("expected only the non-literal arg to remain, got %v", gotArgs)
+	}
+}

@@ -105,6 +105,24 @@ conn.Close()
 }
 ```
 
+## Prepared Statements
+
+配置 `"use_prepared_statements": true`（全局开关，`Config` 顶层字段）后，每个 template 只会在第一次用到时真正 `PREPARE`（`COM_STMT_PREPARE`）一次，之后同一个 worker 生命周期内的所有 session/transaction 都复用同一份 prepared statement（走 `COM_STMT_EXECUTE`），而不是像默认那样每次都重新解析/编译 SQL。
+
+* 这是**全局**开关，不是逐 template 配置的。
+* 要正确复用 prepared statement，worker 必须始终使用同一条底层连接——因此开启这个选项时，worker 内部会固定复用一个 `*sql.Conn`（而不是像默认那样每个 session 都从连接池里重新取一个），直到某次执行出错才会丢弃重连。`connection_type: "short"` 每次都开新连接，天然不适合复用 prepared statement，会退化成每个 session 各自 prepare 一次。
+* **`?` 占位符不能绑定到表名等标识符位置**——这是 MySQL binary protocol 本身的限制，不是这个工具的限制。如果某个 param 的值要拼进表名（比如按连接选定的随机表号），必须给这个 param 加 `"literal": true`，让它在 PREPARE 之前就以字面量文本拼进 SQL 里，不再作为 bind 参数：
+
+```json
+{
+  "sql": "SELECT c from sbtest? WHERE id in (?)",
+  "repeat": 10,
+  "params": [
+    { "type": "ref", "ref_name": "tableNum", "literal": true },
+    { "type": "number", "random_mode": "uniform", "min": 1, "max": 500000 }
+  ]
+}
+```
 
 # 5. 幂律分布算法
 
