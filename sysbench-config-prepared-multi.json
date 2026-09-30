@@ -1,7 +1,9 @@
 {
   "concurrency": 40,
-  "db_conn_str": "root:@tcp(127.0.0.1:4000)/test?parseTime=true&interpolateParams=true&timeout=3s&readTimeout=3s&writeTimeout=3s",
+  "db_conn_str": "root:@tcp(127.0.0.1:4000)/test?parseTime=true&timeout=3s&readTimeout=3s&writeTimeout=3s",
   "use_transaction": true,
+  "use_prepared_statements": true,
+  "multi_statements": true,
   "rate_per_thread": 1,
   "connection_type": "long",
   "templates": [
@@ -24,7 +26,7 @@
       "sql": "SELECT c from sbtest? WHERE id in (?)",
       "repeat": 10,
       "params": [
-        { "type": "ref", "ref_name": "tableNum" },
+        { "type": "ref", "ref_name": "tableNum", "literal": true, "comment": "table names can't be bind params, must be inlined before PREPARE" },
         {
           "type": "number",
           "random_mode": "uniform",

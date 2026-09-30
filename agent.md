@@ -67,6 +67,73 @@ conn.Close()
 * 根据指定 array size，生成 array
 * 一般是生成到 where 条件里的 `in ()` 里面
 
+## 会话变量：跨语句复用同一个随机值
+
+默认每个 param 每次都独立生成一个新的随机值。有些场景需要"生成一次、后面多处复用"，例如：
+
+* sysbench oltp-read-write 那样，一个连接建立时选定一张随机表，之后这个连接上的所有事务都只操作这张表。
+* 一个事务最初选定一个随机 id，后续这个事务里的 update/delete/insert 都用这同一个 id。
+
+通过在 param 上加这三个字段实现：
+
+* `save_as`：生成完这个 param 的值后，把它存到一个变量里，供后面的 param 引用。
+* `scope`：变量的作用域。
+    * `"transaction"`（默认）：每个 session/transaction 开始时清空，只在当前事务内有效。
+    * `"connection"`：只在这个 worker 第一次遇到该变量时生成一次，之后这个 worker 的整个生命周期内都复用同一个值（不会随事务切换而改变）。
+* `type: "ref"` + `ref_name`：不生成新值，直接查找之前用 `save_as` 存过的同名变量并复用它的值；如果变量还没被存过就报错。
+
+一个 template 的 `sql` 允许留空字符串，表示这个 template 只是用来生成/保存变量，不会真的向数据库发请求（省一次网络往返）。
+
+```json
+{
+  "templates": [
+    {
+      "sql": "",
+      "params": [
+        { "type": "number", "random_mode": "uniform", "min": 1, "max": 40, "save_as": "tableNum", "scope": "connection" }
+      ]
+    },
+    {
+      "sql": "SELECT c from sbtest? WHERE id in (?)",
+      "repeat": 10,
+      "params": [
+        { "type": "ref", "ref_name": "tableNum" },
+        { "type": "number", "random_mode": "uniform", "min": 1, "max": 500000 }
+      ]
+    }
+  ]
+}
+```
+
+## Prepared Statements
+
+配置 `"use_prepared_statements": true`（全局开关，`Config` 顶层字段）后，每个 template 只会在第一次用到时真正 `PREPARE`（`COM_STMT_PREPARE`）一次，之后同一个 worker 生命周期内的所有 session/transaction 都复用同一份 prepared statement（走 `COM_STMT_EXECUTE`），而不是像默认那样每次都重新解析/编译 SQL。
+
+* 这是**全局**开关，不是逐 template 配置的。
+* 要正确复用 prepared statement，worker 必须始终使用同一条底层连接——因此开启这个选项时，worker 内部会固定复用一个 `*sql.Conn`（而不是像默认那样每个 session 都从连接池里重新取一个），直到某次执行出错才会丢弃重连。`connection_type: "short"` 每次都开新连接，天然不适合复用 prepared statement，会退化成每个 session 各自 prepare 一次。
+* **`?` 占位符不能绑定到表名等标识符位置**——这是 MySQL binary protocol 本身的限制，不是这个工具的限制。如果某个 param 的值要拼进表名（比如按连接选定的随机表号），必须给这个 param 加 `"literal": true`，让它在 PREPARE 之前就以字面量文本拼进 SQL 里，不再作为 bind 参数：
+
+```json
+{
+  "sql": "SELECT c from sbtest? WHERE id in (?)",
+  "repeat": 10,
+  "params": [
+    { "type": "ref", "ref_name": "tableNum", "literal": true },
+    { "type": "number", "random_mode": "uniform", "min": 1, "max": 500000 }
+  ]
+}
+```
+
+## Multi-Statement + Prepared（`multi-statements-prepared` 分支）
+
+配置 `"multi_statements": true`（要求 `use_transaction` 和 `use_prepared_statements` 也都是 `true`，否则报错拒绝启动）后，一个 session/transaction 内所有 template（含 `repeat`）会被拼成**一条**多语句 SQL 文本，一次性发给服务端（`begin; ...; commit;`），而不是每条语句各自一次网络往返。
+
+* 走的不是二进制协议的 `COM_STMT_EXECUTE`（MySQL wire protocol 不支持批量发送多个 `COM_STMT_EXECUTE` 不等回包），而是 SQL 级 `PREPARE ... FROM '...'` + `SET @v=...; EXECUTE ... USING @v;`——每个 template 的 SQL 形状只会在**整个 worker 生命周期内 PREPARE 一次**（第一次遇到时，连着这次事务一起发出去，不额外增加往返次数），之后所有事务都复用同一个 prepared name。
+* 会自动在 DSN 后面加上 `multiStatements=true`（driver 的 client capability flag），不需要手动改 `db_conn_str`。
+* `literal: true`的参数（比如按连接选定的随机表号）会在 PREPARE 之前就以字面量文本拼进 SQL，其余参数走 `SET @mv_xxx=<字面量值>; EXECUTE ... USING @mv_xxx;`。
+* 已用`tiup playground`实测验证：整个压测过程中每个 SQL 形状只 `PREPARE` 了一次（`grep PREPARE`在general log里只出现两次，对应两个template），后续所有事务都是`begin;SET ...;EXECUTE ...;...;commit;`一次性发送；同一个连接的transaction级随机变量（`save_as`不带`scope`）和connection级随机变量（`scope:"connection"`）都在这条路径下正确工作。
+
+对照实验建议：`multi_statements=off + use_prepared_statements=on` vs `multi_statements=on + use_prepared_statements=on`，其余配置(concurrency/rate/templates)保持一致，对比两者的往返次数/延迟/吞吐差异。
 
 # 5. 幂律分布算法
 
