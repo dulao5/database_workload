@@ -67,6 +67,44 @@ conn.Close()
 * 根据指定 array size，生成 array
 * 一般是生成到 where 条件里的 `in ()` 里面
 
+## 会话变量：跨语句复用同一个随机值
+
+默认每个 param 每次都独立生成一个新的随机值。有些场景需要"生成一次、后面多处复用"，例如：
+
+* sysbench oltp-read-write 那样，一个连接建立时选定一张随机表，之后这个连接上的所有事务都只操作这张表。
+* 一个事务最初选定一个随机 id，后续这个事务里的 update/delete/insert 都用这同一个 id。
+
+通过在 param 上加这三个字段实现：
+
+* `save_as`：生成完这个 param 的值后，把它存到一个变量里，供后面的 param 引用。
+* `scope`：变量的作用域。
+    * `"transaction"`（默认）：每个 session/transaction 开始时清空，只在当前事务内有效。
+    * `"connection"`：只在这个 worker 第一次遇到该变量时生成一次，之后这个 worker 的整个生命周期内都复用同一个值（不会随事务切换而改变）。
+* `type: "ref"` + `ref_name`：不生成新值，直接查找之前用 `save_as` 存过的同名变量并复用它的值；如果变量还没被存过就报错。
+
+一个 template 的 `sql` 允许留空字符串，表示这个 template 只是用来生成/保存变量，不会真的向数据库发请求（省一次网络往返）。
+
+```json
+{
+  "templates": [
+    {
+      "sql": "",
+      "params": [
+        { "type": "number", "random_mode": "uniform", "min": 1, "max": 40, "save_as": "tableNum", "scope": "connection" }
+      ]
+    },
+    {
+      "sql": "SELECT c from sbtest? WHERE id in (?)",
+      "repeat": 10,
+      "params": [
+        { "type": "ref", "ref_name": "tableNum" },
+        { "type": "number", "random_mode": "uniform", "min": 1, "max": 500000 }
+      ]
+    }
+  ]
+}
+```
+
 
 # 5. 幂律分布算法
 

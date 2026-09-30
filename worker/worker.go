@@ -24,6 +24,12 @@ type Worker struct {
 	useTX      bool
 	rate       int
 	db         *sql.DB
+
+	// connVars holds "connection"-scoped session variables: generated once
+	// (the first time their defining param runs) and reused for the rest of
+	// this worker's lifetime, e.g. picking one random table per connection
+	// the way sysbench's oltp-read-write does.
+	connVars map[string]interface{}
 }
 
 // New creates a new Worker.
@@ -32,6 +38,11 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 	for i, tmpl := range cfg.Templates {
 		gens[i] = make([]generator.Generator, len(tmpl.Params))
 		for j, param := range tmpl.Params {
+			if param.Type == "ref" {
+				// A "ref" param doesn't generate anything itself; it looks
+				// up a value saved by an earlier param at runtime.
+				continue
+			}
 			// Make a copy of the param to avoid issues with pointers
 			p := param
 			g, err := generator.New(&p)
@@ -75,7 +86,47 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 		useTX:      cfg.UseTransaction,
 		rate:       cfg.RatePerThread,
 		db:         db,
+		connVars:   make(map[string]interface{}),
 	}, nil
+}
+
+// resolveArg produces the value to bind for a single param: either a fresh
+// (or reused, for "ref") value looked up from session variables, or a
+// freshly generated one — saving it into the right scope's variable store
+// if the param has SaveAs set.
+func (w *Worker) resolveArg(p *config.Param, gen generator.Generator, txVars map[string]interface{}) (interface{}, error) {
+	if p.Type == "ref" {
+		name := ""
+		if p.RefName != nil {
+			name = *p.RefName
+		}
+		if v, ok := txVars[name]; ok {
+			return v, nil
+		}
+		if v, ok := w.connVars[name]; ok {
+			return v, nil
+		}
+		return nil, fmt.Errorf("session variable %q referenced before it was saved", name)
+	}
+
+	val := gen.Generate()
+
+	if p.SaveAs != nil {
+		name := *p.SaveAs
+		if p.ScopeOrDefault() == "connection" {
+			if existing, ok := w.connVars[name]; ok {
+				// Already generated earlier in this worker's lifetime;
+				// reuse it instead of the value just generated above.
+				val = existing
+			} else {
+				w.connVars[name] = val
+			}
+		} else {
+			txVars[name] = val
+		}
+	}
+
+	return val, nil
 }
 
 // Run starts the worker's loop. It stops when the context is cancelled.
@@ -126,13 +177,33 @@ func (w *Worker) runSession(ctx context.Context) {
 		}
 	}
 
+	// txVars holds "transaction"-scoped session variables: fresh for every
+	// session/transaction, so e.g. a random id picked by the first
+	// statement can be reused by later update/delete statements in the
+	// same transaction.
+	txVars := make(map[string]interface{})
+
 	for i, tmpl := range w.templates {
 		repeatTimes := tmpl.GetRepeat()
 		for r := 0; r < repeatTimes; r++ {
 
 			args := make([]interface{}, len(tmpl.Params))
-			for j, gen := range w.generators[i] {
-				args[j] = gen.Generate()
+			for j := range tmpl.Params {
+				v, rerr := w.resolveArg(&tmpl.Params[j], w.generators[i][j], txVars)
+				if rerr != nil {
+					log.Printf("Worker %d: ERROR %v", w.id, rerr)
+					if w.useTX {
+						_ = tx.Rollback()
+					}
+					return
+				}
+				args[j] = v
+			}
+
+			if strings.TrimSpace(tmpl.SQL) == "" {
+				// Local-only template: it exists purely to generate/save
+				// session variables, there's nothing to send to the DB.
+				continue
 			}
 
 			finalSQL, finalArgs := handleArrayParams(tmpl.SQL, args)

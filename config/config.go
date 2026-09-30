@@ -56,6 +56,31 @@ type Param struct {
 	ArraySize     *int    `json:"array_size,omitempty"`
 	ElementType   *string `json:"element_type,omitempty"`
 	ElementConfig *Param  `json:"element_config,omitempty"`
+
+	// Session variables: let a value generated once be reused by later
+	// params instead of generating a fresh independent random value.
+	//
+	// SaveAs, if set, stores this param's generated value under that name
+	// once it has been generated. Scope controls where it is stored:
+	//   - "transaction" (default when SaveAs is set): reset at the start of
+	//     every session/transaction (config.UseTransaction's unit of work).
+	//   - "connection": generated once per worker and kept for the whole
+	//     lifetime of that worker's underlying connection.
+	//
+	// A param with Type "ref" doesn't generate anything; it looks up a
+	// value previously stored under RefName (transaction scope is checked
+	// first, then connection scope) and reuses it as-is.
+	SaveAs  *string `json:"save_as,omitempty"`
+	Scope   *string `json:"scope,omitempty"`
+	RefName *string `json:"ref_name,omitempty"`
+}
+
+// ScopeOrDefault returns the effective scope for a param whose SaveAs is set.
+func (p *Param) ScopeOrDefault() string {
+	if p.Scope != nil && *p.Scope != "" {
+		return *p.Scope
+	}
+	return "transaction"
 }
 
 // LoadConfig reads a configuration file and returns a Config struct
