@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dulao5/tidb-multistmt"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -28,12 +29,14 @@ type Worker struct {
 	rate            int
 	db              *sql.DB
 
-	// multiStmtNames maps a rendered SQL shape to the SQL-level PREPARE
-	// name issued for it (e.g. "PREPARE ps1 FROM '...'"), so multi-statement
-	// mode only ever emits one PREPARE per shape per connection, same as
-	// stmtCache does for the binary-protocol path.
-	multiStmtNames map[string]string
-	multiStmtNext  int
+	// preparedCache gives multi-statement mode the same per-connection
+	// PREPARE reuse stmtCache gives the binary-protocol path, but keyed by
+	// the underlying physical connection (via tidb-multistmt's
+	// PreparedCache) rather than by this Worker object — needed because
+	// connection_type "short" hands out a fresh *sql.Conn from the pool
+	// every session, and a prepared statement is only valid on the
+	// specific physical connection it was PREPAREd on.
+	preparedCache *multistmt.PreparedCache
 
 	// longConn is the one persistent *sql.Conn reused across every
 	// session/transaction when connection_type isn't "short". Prepared
@@ -131,7 +134,7 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 		db:              db,
 		connVars:        make(map[string]interface{}),
 		stmtCache:       make(map[string]*sql.Stmt),
-		multiStmtNames:  make(map[string]string),
+		preparedCache:   multistmt.NewPreparedCache(0, 0),
 	}, nil
 }
 

@@ -3,8 +3,6 @@ package worker
 import (
 	"database_workload/config"
 	"database_workload/generator"
-	"regexp"
-	"strings"
 	"testing"
 )
 
@@ -25,14 +23,13 @@ func newTestWorkerForMultiStatement(templates []config.Template) *Worker {
 		}
 	}
 	return &Worker{
-		templates:      templates,
-		generators:     gens,
-		connVars:       make(map[string]interface{}),
-		multiStmtNames: make(map[string]string),
+		templates:  templates,
+		generators: gens,
+		connVars:   make(map[string]interface{}),
 	}
 }
 
-func TestBuildMultiStatementBatch_PreparesOnceReusesAcrossCalls(t *testing.T) {
+func TestBuildMultiStatementBatch_WrapsTemplatesWithBeginCommit(t *testing.T) {
 	w := newTestWorkerForMultiStatement([]config.Template{
 		{
 			SQL: "SELECT c FROM t WHERE id = ?",
@@ -42,23 +39,47 @@ func TestBuildMultiStatementBatch_PreparesOnceReusesAcrossCalls(t *testing.T) {
 		},
 	})
 
-	batch1, err := w.buildMultiStatementBatch(make(map[string]interface{}))
+	batch, err := w.buildMultiStatementBatch(make(map[string]interface{}))
 	if err != nil {
 		t.Fatalf("buildMultiStatementBatch failed: %v", err)
 	}
-	if strings.Count(batch1, "PREPARE dw_ps_1 FROM") != 1 {
-		t.Fatalf("expected exactly one PREPARE in the first batch, got: %s", batch1)
+	if batch == nil {
+		t.Fatalf("expected a non-nil batch")
 	}
 
-	batch2, err := w.buildMultiStatementBatch(make(map[string]interface{}))
+	stmts := batch.Statements()
+	if len(stmts) != 3 {
+		t.Fatalf("expected begin + 1 template + commit = 3 statements, got %d: %+v", len(stmts), stmts)
+	}
+	if stmts[0].SQL != "begin" {
+		t.Fatalf("expected the first statement to be begin, got %q", stmts[0].SQL)
+	}
+	if stmts[len(stmts)-1].SQL != "commit" {
+		t.Fatalf("expected the last statement to be commit, got %q", stmts[len(stmts)-1].SQL)
+	}
+	if stmts[1].SQL != "SELECT c FROM t WHERE id = ?" {
+		t.Fatalf("expected the template's SQL unchanged (multistmt itself renders PREPARE/EXECUTE), got %q", stmts[1].SQL)
+	}
+	if !stmts[1].HasResultSet {
+		t.Fatalf("expected a SELECT template to be marked HasResultSet")
+	}
+	if len(stmts[1].Args) != 1 {
+		t.Fatalf("expected exactly one bound arg, got %v", stmts[1].Args)
+	}
+}
+
+func TestBuildMultiStatementBatch_NonSelectHasNoResultSet(t *testing.T) {
+	w := newTestWorkerForMultiStatement([]config.Template{
+		{SQL: "UPDATE t SET k = k + 1 WHERE id = ?", Params: []config.Param{numberParam(1, 2)}},
+	})
+
+	batch, err := w.buildMultiStatementBatch(make(map[string]interface{}))
 	if err != nil {
 		t.Fatalf("buildMultiStatementBatch failed: %v", err)
 	}
-	if strings.Contains(batch2, "PREPARE") {
-		t.Fatalf("expected no PREPARE on the second batch (already registered), got: %s", batch2)
-	}
-	if !strings.Contains(batch2, "EXECUTE dw_ps_1") {
-		t.Fatalf("expected the second batch to reuse dw_ps_1, got: %s", batch2)
+	stmts := batch.Statements()
+	if stmts[1].HasResultSet {
+		t.Fatalf("expected an UPDATE template to not be marked HasResultSet")
 	}
 }
 
@@ -78,18 +99,19 @@ func TestBuildMultiStatementBatch_TransactionScopedRefIsReused(t *testing.T) {
 		t.Fatalf("buildMultiStatementBatch failed: %v", err)
 	}
 
-	// Both "SET @mv_...=<value>;" assignments must carry the exact same
-	// value, since the second one is a ref to the first template's saved id.
-	matches := regexp.MustCompile(`SET @mv_\w+=(\d+);`).FindAllStringSubmatch(batch, -1)
-	if len(matches) != 2 {
-		t.Fatalf("expected exactly 2 SET assignments in the batch, got %d: %s", len(matches), batch)
+	stmts := batch.Statements()
+	// stmts[0]=begin, [1]=SELECT, [2]=UPDATE, [3]=commit
+	if len(stmts) != 4 {
+		t.Fatalf("expected 4 statements, got %d: %+v", len(stmts), stmts)
 	}
-	if matches[0][1] != matches[1][1] {
-		t.Fatalf("expected the ref to reuse the same value: first=%s second=%s in batch %s", matches[0][1], matches[1][1], batch)
+	selectArg := stmts[1].Args[0]
+	updateArg := stmts[2].Args[0]
+	if selectArg != updateArg {
+		t.Fatalf("expected the ref to reuse the same value: select=%v update=%v", selectArg, updateArg)
 	}
 }
 
-func TestBuildMultiStatementBatch_LiteralSkipsPrepareParam(t *testing.T) {
+func TestBuildMultiStatementBatch_LiteralParamInlinedIntoSQL(t *testing.T) {
 	tableNum := numberParam(1, 3)
 	tableNum.SaveAs = ptr("tableNum")
 	tableNum.Scope = ptr("connection")
@@ -107,15 +129,18 @@ func TestBuildMultiStatementBatch_LiteralSkipsPrepareParam(t *testing.T) {
 		t.Fatalf("buildMultiStatementBatch failed: %v", err)
 	}
 
-	if !strings.Contains(batch, "PREPARE dw_ps_1 FROM 'SELECT c FROM sbtest") {
-		t.Fatalf("expected the table number inlined into the prepared SQL text, got: %s", batch)
+	stmts := batch.Statements()
+	// stmts[0]=begin, [1]=the SELECT (the local-only template emits nothing)
+	sql := stmts[1].SQL
+	if sql == "SELECT c FROM sbtest? WHERE id = ?" {
+		t.Fatalf("expected the table number inlined into the SQL text, got: %s", sql)
 	}
-	if strings.Contains(batch, "sbtest?") {
-		t.Fatalf("literal param leaked through as a bind placeholder: %s", batch)
+	if len(stmts[1].Args) != 1 {
+		t.Fatalf("expected the literal param to not count as a bind arg, got %v", stmts[1].Args)
 	}
 }
 
-func TestBuildMultiStatementBatch_AllLocalOnlyProducesEmptyBatch(t *testing.T) {
+func TestBuildMultiStatementBatch_AllLocalOnlyProducesNilBatch(t *testing.T) {
 	tableNum := numberParam(1, 3)
 	tableNum.SaveAs = ptr("tableNum")
 
@@ -127,7 +152,7 @@ func TestBuildMultiStatementBatch_AllLocalOnlyProducesEmptyBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildMultiStatementBatch failed: %v", err)
 	}
-	if batch != "" {
-		t.Fatalf("expected an empty batch when every template is local-only, got: %s", batch)
+	if batch != nil {
+		t.Fatalf("expected a nil batch when every template is local-only, got: %+v", batch.Statements())
 	}
 }
