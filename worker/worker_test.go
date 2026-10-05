@@ -110,6 +110,49 @@ func TestResolveArg_RefBeforeSaveIsAnError(t *testing.T) {
 	}
 }
 
+func TestResolveArg_OffsetAppliesToFreshValue(t *testing.T) {
+	w := &Worker{connVars: make(map[string]interface{})}
+	txVars := make(map[string]interface{})
+
+	p := config.Param{Type: "number", RandomMode: "uniform", Min: ptr(int64(5)), Max: ptr(int64(5)), Offset: ptr(int64(100))}
+	gen, err := generator.New(&p)
+	if err != nil {
+		t.Fatalf("failed to build generator: %v", err)
+	}
+
+	val, err := w.resolveArg(&p, gen, txVars)
+	if err != nil {
+		t.Fatalf("resolveArg failed: %v", err)
+	}
+	if val != int64(105) {
+		t.Fatalf("expected 5+100=105, got %v", val)
+	}
+}
+
+func TestResolveArg_OffsetAppliesToRef(t *testing.T) {
+	w := &Worker{connVars: make(map[string]interface{})}
+	txVars := make(map[string]interface{})
+
+	define := numberParam(7, 7)
+	define.SaveAs = ptr("rangeFrom")
+	defGen, err := generator.New(&define)
+	if err != nil {
+		t.Fatalf("failed to build generator: %v", err)
+	}
+	if _, err := w.resolveArg(&define, defGen, txVars); err != nil {
+		t.Fatalf("resolveArg failed: %v", err)
+	}
+
+	ref := config.Param{Type: "ref", RefName: ptr("rangeFrom"), Offset: ptr(int64(100))}
+	val, err := w.resolveArg(&ref, nil, txVars)
+	if err != nil {
+		t.Fatalf("resolveArg for ref failed: %v", err)
+	}
+	if val != int64(107) {
+		t.Fatalf("expected 7+100=107, got %v", val)
+	}
+}
+
 func TestSplitLiteralAndBindArgs_NoLiteralsIsUnchanged(t *testing.T) {
 	sql := "SELECT c FROM t WHERE id = ? AND name = ?"
 	params := []config.Param{{Type: "number"}, {Type: "string"}}
