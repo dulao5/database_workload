@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strings"
 
@@ -34,7 +35,7 @@ func (w *Worker) runSessionMultiStatement(ctx context.Context) {
 	sessionFailed := false
 	defer func() {
 		if sessionFailed && !w.isShortConn {
-			w.longConn = nil
+			w.dropLongConn()
 		}
 	}()
 
@@ -55,11 +56,36 @@ func (w *Worker) runSessionMultiStatement(ctx context.Context) {
 		return
 	}
 
-	if err := batch.Execute(ctx, conn, multistmt.WithPreparedCache(w.preparedCache)); err != nil {
-		log.Printf("Worker %d: ERROR multi-statement batch failed: %v", w.id, err)
-		sessionFailed = true
+	execErr := batch.Execute(ctx, conn, multistmt.WithPreparedCache(w.preparedCache))
+	if execErr == nil {
 		return
 	}
+
+	// Pull out exactly which statement failed, its original SQL text, and
+	// the underlying error — multistmt's own *BatchError already carries
+	// all three (see its doc comment); this is the same errors.As pattern
+	// its README's usage example recommends, not ad-hoc string formatting.
+	var batchErr *multistmt.BatchError
+	if errors.As(execErr, &batchErr) {
+		log.Printf("Worker %d: ERROR multi-statement batch failed at statement #%d (%s): %v",
+			w.id, batchErr.Index, batchErr.SQL, batchErr.Err)
+	} else {
+		// Index is -1 / no statement-level detail: the connection likely
+		// died before the batch's own position-recovery marker could even
+		// be set (see BatchError's doc comment on Index == -1).
+		log.Printf("Worker %d: ERROR multi-statement batch failed: %v", w.id, execErr)
+	}
+
+	// The batch's own trailing "commit" never ran, but its leading "begin"
+	// did — the connection may be sitting on an open, uncommitted
+	// transaction. Roll it back explicitly so the connection is clean
+	// before acquireConn hands it to (or runSession reuses it for) the next
+	// session, same discipline as runSession/runSessionFixedPrepared.
+	if _, rbErr := conn.ExecContext(ctx, "ROLLBACK"); rbErr != nil {
+		log.Printf("Worker %d: ERROR failed to rollback multi-statement batch: %v", w.id, rbErr)
+	}
+
+	sessionFailed = true
 }
 
 // buildMultiStatementBatch renders every template/repeat in one

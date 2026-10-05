@@ -28,7 +28,7 @@ func (w *Worker) runSessionMultiStatementRaw(ctx context.Context) {
 	sessionFailed := false
 	defer func() {
 		if sessionFailed && !w.isShortConn {
-			w.longConn = nil
+			w.dropLongConn()
 		}
 	}()
 

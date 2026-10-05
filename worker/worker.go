@@ -317,7 +317,7 @@ func (w *Worker) runSession(ctx context.Context) {
 	sessionFailed := false
 	defer func() {
 		if sessionFailed && !w.isShortConn {
-			w.longConn = nil
+			w.dropLongConn()
 			w.stmtCache = make(map[string]*sql.Stmt)
 		}
 	}()
@@ -450,6 +450,21 @@ func (w *Worker) acquireConn(ctx context.Context) (*sql.Conn, bool, error) {
 		w.longConn = conn
 	}
 	return w.longConn, false, nil
+}
+
+// dropLongConn discards w.longConn after a session on it failed, so the
+// next acquireConn call opens a fresh one instead of reusing something
+// stale. It also closes the old *sql.Conn — not just forgetting Worker's
+// own reference to it — because db.SetMaxOpenConns(1) means the pool won't
+// hand out a replacement connection until this one is actually released;
+// skipping Close here would make the very next acquireConn call (or
+// w.db.Conn(ctx) in general) block forever waiting for a connection slot
+// that will never free up on its own.
+func (w *Worker) dropLongConn() {
+	if w.longConn != nil {
+		w.longConn.Close()
+		w.longConn = nil
+	}
 }
 
 func handleArrayParams(sql string, args []interface{}) (string, []interface{}) {
