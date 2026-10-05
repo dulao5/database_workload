@@ -14,11 +14,21 @@ type Config struct {
 	UseTransaction        bool   `json:"use_transaction"`
 	UsePreparedStatements bool   `json:"use_prepared_statements,omitempty"`
 	// MultiStatements, when true, sends one whole transaction (every
-	// template/repeat's PREPARE+EXECUTE) as a single multi-statement round
-	// trip instead of one round trip per statement. Requires
-	// use_transaction and use_prepared_statements to both be true.
-	MultiStatements bool       `json:"multi_statements,omitempty"`
-	Templates       []Template `json:"templates"`
+	// template/repeat's statement) as a single multi-statement round trip
+	// instead of one round trip per statement. Requires use_transaction and
+	// use_prepared_statements to both be true.
+	MultiStatements bool `json:"multi_statements,omitempty"`
+	// MultiStatementsMode selects how a multi-statement batch is rendered,
+	// only meaningful together with multi_statements:
+	//   - "prepared_cache" (default): every statement goes through
+	//     PREPARE/EXECUTE, and a statement already PREPAREd earlier on this
+	//     connection is reused instead of PREPAREd again (tidb-multistmt's
+	//     PreparedCache).
+	//   - "raw": no PREPARE/EXECUTE at all — every statement's args are
+	//     substituted directly into the SQL text as literals, and the whole
+	//     transaction is sent as one semicolon-joined COM_QUERY.
+	MultiStatementsMode string     `json:"multi_statements_mode,omitempty"`
+	Templates           []Template `json:"templates"`
 }
 
 // Template represents a single SQL query template

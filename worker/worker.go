@@ -25,9 +25,14 @@ type Worker struct {
 	useTX           bool
 	usePrepared     bool
 	multiStatements bool
-	isShortConn     bool
-	rate            int
-	db              *sql.DB
+	// multiStatementsRaw selects multi-statement mode's "raw" rendering
+	// (literal args inlined into SQL text, no PREPARE/EXECUTE at all)
+	// instead of the default PreparedCache-backed one. See
+	// config.Config.MultiStatementsMode.
+	multiStatementsRaw bool
+	isShortConn        bool
+	rate               int
+	db                 *sql.DB
 
 	// preparedCache gives multi-statement mode the same per-connection
 	// PREPARE reuse stmtCache gives the binary-protocol path, but keyed by
@@ -121,20 +126,31 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 		return nil, fmt.Errorf("multi_statements requires use_transaction and use_prepared_statements to both be true")
 	}
 
+	multiStatementsRaw := false
+	switch cfg.MultiStatementsMode {
+	case "", "prepared_cache":
+		// default
+	case "raw":
+		multiStatementsRaw = true
+	default:
+		return nil, fmt.Errorf("multi_statements_mode must be %q or %q, got %q", "prepared_cache", "raw", cfg.MultiStatementsMode)
+	}
+
 	return &Worker{
-		id:              id,
-		dbConnStr:       cfg.DBConnStr,
-		templates:       cfg.Templates,
-		generators:      gens,
-		useTX:           cfg.UseTransaction,
-		usePrepared:     cfg.UsePreparedStatements,
-		multiStatements: cfg.MultiStatements,
-		isShortConn:     cfg.ConnectionType == "short",
-		rate:            cfg.RatePerThread,
-		db:              db,
-		connVars:        make(map[string]interface{}),
-		stmtCache:       make(map[string]*sql.Stmt),
-		preparedCache:   multistmt.NewPreparedCache(0, 0),
+		id:                 id,
+		dbConnStr:          cfg.DBConnStr,
+		templates:          cfg.Templates,
+		generators:         gens,
+		useTX:              cfg.UseTransaction,
+		usePrepared:        cfg.UsePreparedStatements,
+		multiStatements:    cfg.MultiStatements,
+		multiStatementsRaw: multiStatementsRaw,
+		isShortConn:        cfg.ConnectionType == "short",
+		rate:               cfg.RatePerThread,
+		db:                 db,
+		connVars:           make(map[string]interface{}),
+		stmtCache:          make(map[string]*sql.Stmt),
+		preparedCache:      multistmt.NewPreparedCache(0, 0),
 	}, nil
 }
 
@@ -263,7 +279,11 @@ func (w *Worker) Run(ctx context.Context) {
 
 func (w *Worker) runSession(ctx context.Context) {
 	if w.multiStatements {
-		w.runSessionMultiStatement(ctx)
+		if w.multiStatementsRaw {
+			w.runSessionMultiStatementRaw(ctx)
+		} else {
+			w.runSessionMultiStatement(ctx)
+		}
 		return
 	}
 
