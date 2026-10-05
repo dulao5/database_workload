@@ -27,8 +27,21 @@ type Config struct {
 	//   - "raw": no PREPARE/EXECUTE at all — every statement's args are
 	//     substituted directly into the SQL text as literals, and the whole
 	//     transaction is sent as one semicolon-joined COM_QUERY.
-	MultiStatementsMode string     `json:"multi_statements_mode,omitempty"`
-	Templates           []Template `json:"templates"`
+	MultiStatementsMode string `json:"multi_statements_mode,omitempty"`
+	// FixPreparedStatementReuse, when true (only meaningful for the non-multi,
+	// use_transaction+use_prepared_statements path), avoids a database/sql
+	// stdlib edge case that silently defeats stmtCache's "prepare once,
+	// execute many" intent: wrapping a *sql.Stmt obtained from
+	// (*sql.Conn).PrepareContext in (*sql.Tx).StmtContext always re-PREPAREs
+	// (see database/sql's own comment on stmt.cg != nil in Tx.StmtContext)
+	// and really DEALLOCATEs on commit, because that Stmt's cg field is the
+	// *sql.Conn, not nil. With this on, BEGIN/COMMIT are sent as plain text
+	// on the same connection (no *sql.Tx at all) and the cached *sql.Stmt is
+	// called directly, so a statement is PREPAREd once and EXECUTEd many
+	// times for as long as the connection lives, same as the multi_statements
+	// path already gets via PreparedCache.
+	FixPreparedStatementReuse bool       `json:"fix_prepared_statement_reuse,omitempty"`
+	Templates                 []Template `json:"templates"`
 }
 
 // Template represents a single SQL query template
