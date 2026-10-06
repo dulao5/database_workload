@@ -121,7 +121,14 @@ func (w *Worker) buildMultiStatementBatch(txVars map[string]interface{}) (*multi
 			}
 
 			literalSQL, bindArgs := splitLiteralAndBindArgs(tmpl.SQL, tmpl.Params, args)
-			renderedSQL, finalArgs := handleArrayParams(literalSQL, bindArgs)
+			renderedSQL, finalArgs, err := multistmt.ExpandIn(literalSQL, bindArgs)
+			if err != nil {
+				// Pure in-memory rendering failure, same as the resolveArg
+				// error path above: nothing has been sent to the server yet
+				// (the multistmt.Batch is only built after this loop), so
+				// there's no open transaction to roll back here.
+				return nil, err
+			}
 			isSelect := strings.HasPrefix(strings.TrimSpace(strings.ToUpper(renderedSQL)), "SELECT")
 
 			stmts = append(stmts, renderedStmt{sql: renderedSQL, args: finalArgs, hasResultSet: isSelect})

@@ -363,7 +363,15 @@ func (w *Worker) runSession(ctx context.Context) {
 			}
 
 			literalSQL, bindArgs := splitLiteralAndBindArgs(tmpl.SQL, tmpl.Params, args)
-			finalSQL, finalArgs := handleArrayParams(literalSQL, bindArgs)
+			finalSQL, finalArgs, eerr := multistmt.ExpandIn(literalSQL, bindArgs)
+			if eerr != nil {
+				log.Printf("Worker %d: ERROR %v", w.id, eerr)
+				if w.useTX {
+					_ = tx.Rollback()
+				}
+				sessionFailed = true
+				return
+			}
 
 			isSelect := strings.HasPrefix(strings.TrimSpace(strings.ToUpper(finalSQL)), "SELECT")
 
@@ -465,39 +473,4 @@ func (w *Worker) dropLongConn() {
 		w.longConn.Close()
 		w.longConn = nil
 	}
-}
-
-func handleArrayParams(sql string, args []interface{}) (string, []interface{}) {
-	finalSQL := ""
-	sqlParts := strings.Split(sql, "?")
-
-	if len(sqlParts)-1 != len(args) {
-		return sql, args
-	}
-
-	newArgs := make([]interface{}, 0, len(args))
-	for i, arg := range args {
-		finalSQL += sqlParts[i]
-		arr, ok := arg.([]interface{})
-		if ok {
-			if len(arr) == 0 {
-				// Handle empty array case, maybe return an error or a specific SQL syntax
-				// For now, we just add a single NULL placeholder to avoid syntax errors.
-				finalSQL += "?"
-				newArgs = append(newArgs, nil)
-				continue
-			}
-			placeholders := strings.Repeat("?,", len(arr))
-			placeholders = strings.TrimSuffix(placeholders, ",")
-			finalSQL += placeholders
-			newArgs = append(newArgs, arr...)
-		} else {
-			finalSQL += "?"
-			newArgs = append(newArgs, arg)
-		}
-	}
-	finalSQL += sqlParts[len(sqlParts)-1]
-
-	// fmt.Println(finalSQL, newArgs) // Debug print
-	return finalSQL, newArgs
 }

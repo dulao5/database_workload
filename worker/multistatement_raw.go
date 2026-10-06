@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dulao5/tidb-multistmt"
 )
 
 // runSessionMultiStatementRaw is multi_statements_mode "raw": every
@@ -96,7 +98,10 @@ func (w *Worker) buildMultiStatementRawBatch(txVars map[string]interface{}) (str
 			}
 
 			literalSQL, bindArgs := splitLiteralAndBindArgs(tmpl.SQL, tmpl.Params, args)
-			renderedSQL, finalArgs := handleArrayParams(literalSQL, bindArgs)
+			renderedSQL, finalArgs, eerr := multistmt.ExpandIn(literalSQL, bindArgs)
+			if eerr != nil {
+				return "", false, fmt.Errorf("statement %d: %w", i, eerr)
+			}
 
 			inlinedSQL, err := inlineLiterals(renderedSQL, finalArgs)
 			if err != nil {

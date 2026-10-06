@@ -3,7 +3,7 @@ module database_workload
 go 1.25.6
 
 require (
-	github.com/dulao5/tidb-multistmt v0.0.0-20261005065535-5fddc32de7a0
+	github.com/dulao5/tidb-multistmt v0.0.0-20261006064249-b248162a9e82
 	github.com/go-sql-driver/mysql v1.9.3
 )
 

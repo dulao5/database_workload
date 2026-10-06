@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"log"
 	"strings"
+
+	"github.com/dulao5/tidb-multistmt"
 )
 
 // runSessionFixedPrepared is the non-multi, use_transaction+use_prepared_statements
@@ -91,7 +93,13 @@ func (w *Worker) runSessionFixedPrepared(ctx context.Context) {
 			}
 
 			literalSQL, bindArgs := splitLiteralAndBindArgs(tmpl.SQL, tmpl.Params, args)
-			finalSQL, finalArgs := handleArrayParams(literalSQL, bindArgs)
+			finalSQL, finalArgs, eerr := multistmt.ExpandIn(literalSQL, bindArgs)
+			if eerr != nil {
+				log.Printf("Worker %d: ERROR %v", w.id, eerr)
+				rollback()
+				sessionFailed = true
+				return
+			}
 			isSelect := strings.HasPrefix(strings.TrimSpace(strings.ToUpper(finalSQL)), "SELECT")
 
 			stmt, serr := w.getOrPrepareStmt(ctx, conn, finalSQL)
