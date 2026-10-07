@@ -27,13 +27,6 @@ type Config struct {
 	//   - "raw": no PREPARE/EXECUTE at all — every statement's args are
 	//     substituted directly into the SQL text as literals, and the whole
 	//     transaction is sent as one semicolon-joined COM_QUERY.
-	//   - "set_only": every template/repeat is still rendered with real bound
-	//     args, same as "prepared_cache", but only the resulting
-	//     SET @_multistmt_statement_num=... marker sequence is sent — no
-	//     PREPARE/EXECUTE/begin/commit/real query reaches the server at all
-	//     (tidb-multistmt's BuildSetOnlySQL/ExecuteSetOnly). A throwaway A/B
-	//     baseline for isolating the SET-dispatch cost at matching
-	//     throughput, not a real workload: no table is read or written.
 	MultiStatementsMode string `json:"multi_statements_mode,omitempty"`
 	// FixPreparedStatementReuse, when true (only meaningful for the non-multi,
 	// use_transaction+use_prepared_statements path), avoids a database/sql

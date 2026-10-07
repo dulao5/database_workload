@@ -2,7 +2,5 @@ filippo.io/edwards25519 v1.1.0 h1:FNf4tywRC1HmFuKW5xopWpigGjJKiJSV0Cqo0cJWDaA=
 filippo.io/edwards25519 v1.1.0/go.mod h1:BxyFTGdWcka3PhytdK4V28tE5sGfRvvvRV7EaN4VDT4=
 github.com/dulao5/tidb-multistmt v0.0.0-20261006120221-c62eea454d24 h1:8A/qmWowhlMDSXi+e38uP4c9rTSB/UMOgwwzWeMKyxg=
 github.com/dulao5/tidb-multistmt v0.0.0-20261006120221-c62eea454d24/go.mod h1:XtEap/+++yhZOufdDkFUzPt0em2cMVaBl5PhAdch6TQ=
-github.com/dulao5/tidb-multistmt v0.0.0-20261007041722-dc8f99b757a1 h1:Eyz/YpcbrUgbpgnuIe2cXlkUkOAksoG6ZSXqFucFJaQ=
-github.com/dulao5/tidb-multistmt v0.0.0-20261007041722-dc8f99b757a1/go.mod h1:XtEap/+++yhZOufdDkFUzPt0em2cMVaBl5PhAdch6TQ=
 github.com/go-sql-driver/mysql v1.9.3 h1:U/N249h2WzJ3Ukj8SowVFjdtZKfu9vlLZxjPXV1aweo=
 github.com/go-sql-driver/mysql v1.9.3/go.mod h1:qn46aNg1333BRMNU69Lq93t8du/dwxI64Gl8i5p1WMU=
