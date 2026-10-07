@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net"
 	"strings"
 	"time"
 
@@ -36,9 +37,13 @@ type Worker struct {
 	// config.Config.FixPreparedStatementReuse's doc comment) tx.StmtContext
 	// path.
 	fixPreparedStatementReuse bool
-	isShortConn               bool
-	rate                      int
-	db                        *sql.DB
+	// pipelinedBinary selects the raw-protocol pipelined-EXECUTE path
+	// instead of any of the above. See config.Config.PipelinedBinary and
+	// pipelined_binary.go's package doc comment.
+	pipelinedBinary bool
+	isShortConn     bool
+	rate            int
+	db              *sql.DB
 
 	// preparedCache gives multi-statement mode the same per-connection
 	// PREPARE reuse stmtCache gives the binary-protocol path, but keyed by
@@ -68,6 +73,13 @@ type Worker struct {
 	// template is only ever prepared once per underlying connection and
 	// reused (via tx.StmtContext) for as long as that connection lives.
 	stmtCache map[string]*sql.Stmt
+
+	// rawConn/rawStmtCache/rawDB/rawPoolConn back the pipelinedBinary path
+	// only; see pipelined_binary.go.
+	rawConn      net.Conn
+	rawStmtCache map[string]rawPreparedStmt
+	rawDB        *sql.DB
+	rawPoolConn  *sql.Conn
 }
 
 // New creates a new Worker.
@@ -145,7 +157,7 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 		return nil, fmt.Errorf("multi_statements_mode must be %q or %q, got %q", "prepared_cache", "raw", cfg.MultiStatementsMode)
 	}
 
-	return &Worker{
+	w := &Worker{
 		id:                        id,
 		dbConnStr:                 cfg.DBConnStr,
 		templates:                 cfg.Templates,
@@ -155,13 +167,18 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 		multiStatements:           cfg.MultiStatements,
 		multiStatementsRaw:        multiStatementsRaw,
 		fixPreparedStatementReuse: cfg.FixPreparedStatementReuse,
+		pipelinedBinary:           cfg.PipelinedBinary,
 		isShortConn:               cfg.ConnectionType == "short",
 		rate:                      cfg.RatePerThread,
 		db:                        db,
 		connVars:                  make(map[string]interface{}),
 		stmtCache:                 make(map[string]*sql.Stmt),
 		preparedCache:             multistmt.NewPreparedCache(0, 0),
-	}, nil
+	}
+	if cfg.PipelinedBinary {
+		registerRawDialer(id)
+	}
+	return w, nil
 }
 
 // getOrPrepareStmt returns a cached prepared statement for the given SQL
@@ -288,6 +305,10 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) runSession(ctx context.Context) {
+	if w.pipelinedBinary {
+		w.runSessionPipelinedBinary(ctx)
+		return
+	}
 	if w.multiStatements {
 		if w.multiStatementsRaw {
 			w.runSessionMultiStatementRaw(ctx)
