@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"net"
 	"strings"
 	"time"
 
+	"github.com/dulao5/tidb-binary-multistmt"
 	"github.com/dulao5/tidb-multistmt"
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -74,12 +74,11 @@ type Worker struct {
 	// reused (via tx.StmtContext) for as long as that connection lives.
 	stmtCache map[string]*sql.Stmt
 
-	// rawConn/rawStmtCache/rawDB/rawPoolConn back the pipelinedBinary path
-	// only; see pipelined_binary.go.
-	rawConn      net.Conn
-	rawStmtCache map[string]rawPreparedStmt
-	rawDB        *sql.DB
-	rawPoolConn  *sql.Conn
+	// rawDB/rawConn back the pipelinedBinary path only; see
+	// pipelined_binary.go. rawDB is capped at maxConns=1 (see New) — this
+	// worker only ever owns one physical connection via it at a time.
+	rawDB   *binarymultistmt.DB
+	rawConn *binarymultistmt.Conn
 }
 
 // New creates a new Worker.
@@ -176,7 +175,15 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 		preparedCache:             multistmt.NewPreparedCache(0, 0),
 	}
 	if cfg.PipelinedBinary {
-		registerRawDialer(id)
+		// maxConns=1: this worker only ever drives one physical connection
+		// through w.rawDB, reused across sessions for as long as the
+		// worker lives — see acquireRawConn in pipelined_binary.go.
+		rawDB, err := binarymultistmt.Open(cfg.DBConnStr, 1)
+		if err != nil {
+			log.Printf("Worker %d: ERROR failed to open pipelined-binary connection pool: %v", id, err)
+			return nil, err
+		}
+		w.rawDB = rawDB
 	}
 	return w, nil
 }

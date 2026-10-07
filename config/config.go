@@ -41,20 +41,20 @@ type Config struct {
 	// times for as long as the connection lives, same as the multi_statements
 	// path already gets via PreparedCache.
 	FixPreparedStatementReuse bool `json:"fix_prepared_statement_reuse,omitempty"`
-	// PipelinedBinary, when true, is a throwaway experiment mode: it bypasses
-	// go-sql-driver/mysql entirely for the real statements in a transaction
-	// (reusing the same template rendering multi_statements does), hijacks
-	// the underlying net.Conn via a custom dial hook, and hand-writes binary
-	// COM_STMT_PREPARE/COM_STMT_EXECUTE packets directly — writing all of a
-	// transaction's EXECUTE packets back-to-back before reading any response,
-	// to measure whether that round-trip pipelining beats go-sql-driver's
-	// normal one-write-one-read-per-statement path. Only pessimistic
-	// transactions are supported: BEGIN is sent before the pipelined batch,
-	// and COMMIT/ROLLBACK is decided only after every response in the batch
+	// PipelinedBinary, when true, renders a transaction the same way
+	// multi_statements does (same template rendering) but sends it via
+	// github.com/dulao5/tidb-binary-multistmt instead: pipelined binary
+	// COM_STMT_EXECUTE over a hijacked connection, writing all of a
+	// transaction's EXECUTE packets back-to-back before reading any
+	// response, instead of go-sql-driver's normal
+	// one-write-one-read-per-statement path. Only pessimistic transactions
+	// are supported: BEGIN is sent before the pipelined batch, and
+	// COMMIT/ROLLBACK is decided only after every response in the batch
 	// has been read (a statement failing mid-pipeline does not stop already
 	// in-flight statements from executing — see worker/pipelined_binary.go's
-	// package doc comment). Ignores use_transaction/use_prepared_statements/
-	// multi_statements/fix_prepared_statement_reuse.
+	// package doc comment, and tidb-binary-multistmt's own README). Ignores
+	// use_transaction/use_prepared_statements/multi_statements/
+	// fix_prepared_statement_reuse.
 	PipelinedBinary bool       `json:"pipelined_binary,omitempty"`
 	Templates       []Template `json:"templates"`
 }
