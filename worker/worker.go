@@ -30,6 +30,12 @@ type Worker struct {
 	// instead of the default PreparedCache-backed one. See
 	// config.Config.MultiStatementsMode.
 	multiStatementsRaw bool
+	// multiStatementsSetOnly selects multi-statement mode's "set_only"
+	// rendering: the batch is still built from real templates/bound args,
+	// but only its SET-marker sequence is sent — no PREPARE/EXECUTE/real
+	// query/begin/commit reaches the server. See
+	// config.Config.MultiStatementsMode.
+	multiStatementsSetOnly bool
 	// fixPreparedStatementReuse selects the non-multi path's fixed
 	// prepared-statement reuse (BEGIN/COMMIT as plain text, no *sql.Tx
 	// wrapping a cached *sql.Stmt) instead of the default (buggy, see
@@ -136,13 +142,16 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 	}
 
 	multiStatementsRaw := false
+	multiStatementsSetOnly := false
 	switch cfg.MultiStatementsMode {
 	case "", "prepared_cache":
 		// default
 	case "raw":
 		multiStatementsRaw = true
+	case "set_only":
+		multiStatementsSetOnly = true
 	default:
-		return nil, fmt.Errorf("multi_statements_mode must be %q or %q, got %q", "prepared_cache", "raw", cfg.MultiStatementsMode)
+		return nil, fmt.Errorf("multi_statements_mode must be %q, %q, or %q, got %q", "prepared_cache", "raw", "set_only", cfg.MultiStatementsMode)
 	}
 
 	return &Worker{
@@ -154,6 +163,7 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 		usePrepared:               cfg.UsePreparedStatements,
 		multiStatements:           cfg.MultiStatements,
 		multiStatementsRaw:        multiStatementsRaw,
+		multiStatementsSetOnly:    multiStatementsSetOnly,
 		fixPreparedStatementReuse: cfg.FixPreparedStatementReuse,
 		isShortConn:               cfg.ConnectionType == "short",
 		rate:                      cfg.RatePerThread,
@@ -289,9 +299,12 @@ func (w *Worker) Run(ctx context.Context) {
 
 func (w *Worker) runSession(ctx context.Context) {
 	if w.multiStatements {
-		if w.multiStatementsRaw {
+		switch {
+		case w.multiStatementsRaw:
 			w.runSessionMultiStatementRaw(ctx)
-		} else {
+		case w.multiStatementsSetOnly:
+			w.runSessionMultiStatementSetOnly(ctx)
+		default:
 			w.runSessionMultiStatement(ctx)
 		}
 		return
