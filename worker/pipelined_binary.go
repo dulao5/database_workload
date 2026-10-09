@@ -23,6 +23,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"log"
 
 	"github.com/dulao5/tidb-binary-multistmt"
@@ -98,12 +99,18 @@ func (w *Worker) runSessionPipelinedBinary(ctx context.Context) {
 	}
 
 	res, err := conn.Execute(ctx, b)
-	if err != nil {
+	var commitErr *binarymultistmt.CommitError
+	switch {
+	case errors.As(err, &commitErr):
+		// Every statement succeeded, but COMMIT itself was rejected (e.g. a
+		// write conflict). TiDB already rolled back server-side — conn is
+		// still healthy and reusable, and there's nothing to roll back, so
+		// don't dropRawConn here.
+		log.Printf("Worker %d: WARN pipelined-binary: commit rejected (already rolled back server-side): %v", w.id, commitErr)
+	case err != nil:
 		log.Printf("Worker %d: ERROR pipelined-binary: %v", w.id, err)
 		w.dropRawConn()
-		return
-	}
-	if !res.AllSucceeded {
+	case !res.AllSucceeded:
 		if err := conn.Rollback(ctx); err != nil {
 			log.Printf("Worker %d: ERROR pipelined-binary: ROLLBACK failed: %v", w.id, err)
 			w.dropRawConn()
