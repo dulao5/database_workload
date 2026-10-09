@@ -84,8 +84,17 @@ func (w *Worker) runSessionPipelinedBinary(ctx context.Context) {
 	real := all[1 : len(all)-1] // drop the synthetic "begin"/"commit" buildMultiStatementBatch adds
 
 	b := binarymultistmt.NewBatch()
-	for _, s := range real {
-		b.Add(s.SQL, s.Args, s.HasResultSet)
+	for i, s := range real {
+		idx, sqlText := i, s.SQL
+		b.Add(sqlText, s.Args, func(sr *binarymultistmt.StatementResult) {
+			if sr.Err != nil {
+				log.Printf("Worker %d: ERROR pipelined-binary: statement #%d (%s) failed: %v", w.id, idx, sqlText, sr.Err)
+			}
+			// Rows (if any) are left unconsumed on purpose — this workload
+			// never needs the data back, and binarymultistmt auto-drains
+			// whatever a Callback doesn't read, so skipping it here is both
+			// correct and the cheaper path.
+		})
 	}
 
 	res, err := conn.Execute(ctx, b)
@@ -95,11 +104,6 @@ func (w *Worker) runSessionPipelinedBinary(ctx context.Context) {
 		return
 	}
 	if !res.AllSucceeded {
-		for _, r := range res.Results {
-			if r.Err != nil {
-				log.Printf("Worker %d: ERROR pipelined-binary: statement #%d (%s) failed: %v", w.id, r.Index, r.SQL, r.Err)
-			}
-		}
 		if err := conn.Rollback(ctx); err != nil {
 			log.Printf("Worker %d: ERROR pipelined-binary: ROLLBACK failed: %v", w.id, err)
 			w.dropRawConn()
