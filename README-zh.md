@@ -245,3 +245,36 @@ database_workload -config config.json
     }
 }
 ```
+
+## Sysbench OLTP 配置文件
+
+仓库里自带了几个现成的`sysbench-config-*.json`配置文件（加上更早期的`config.json`/`sysbench-config.json`），每一个都对应一种不同的执行路径，可以在同样的并发/吞吐下互相对比压测。"完整版"oltp-read-write系列（4种SELECT变体+2个UPDATE+DELETE+INSERT，照搬sysbench自己的`oltp_read_write.lua`）才是真正用于每一轮fix-prepared/multi-statement/pipelined-binary对比测试的那一套；`*-prepared*`/`sysbench-config.json`/`config.json`这几个文件是更早期、更小的原型，留着只是方便本地快速冒烟测试，不用于正式的头对头对比。
+
+| 文件 | 模板 | 执行模式 | 相对baseline多开的flag |
+|---|---|---|---|
+| `sysbench-config-oltp-read-write.json` | 完整oltp-read-write（10个模板） | 普通的`database/sql`prepared statement，走`(*sql.Tx).StmtContext`——这是"朴素"baseline，会悄悄每次都重新PREPARE（见`config/config.go`里`FixPreparedStatementReuse`的doc comment），所以**不等于**benchmark里用作对照的那个"fix-prepared"baseline | `use_prepared_statements:true`，`multi_statements:false` |
+| `sysbench-config-oltp-read-write-fixprepared.json` | 同上 | **fix-prepared**：每条语句只PREPARE一次，整条连接生命周期内复用（绕开上面那个stdlib `Tx.StmtContext`重新PREPARE的行为）——这是其他所有模式对比时用的baseline | 加了`fix_prepared_statement_reuse:true` |
+| `sysbench-config-oltp-read-write-multi.json` | 同上 | **multi-statement**：整个事务走`tidb-multistmt`的一次文本协议往返（`SET`标记位+`EXECUTE ps USING ...`） | `multi_statements:true` |
+| `sysbench-config-oltp-read-write-pipelined.json` | 同上 | **binary-multistmt（pipelined）**：整个事务经由`github.com/dulao5/tidb-binary-multistmt`pipeline发送——二进制`COM_STMT_EXECUTE`包连续写完，一次往返，没有文本协议的`SET`标记 | 加了`pipelined_binary:true`（`multi_statements`为保持一致也设了true，但这个模式下会被忽略——见`PipelinedBinary`的doc comment） |
+| `sysbench-config-prepared.json` | 精简版2模板原型（只有选表+批量point-select，早于完整sysbench移植版本） | 普通prepared statement（跟上面完整版baseline同样的坑） | `use_prepared_statements:true`，`multi_statements:false` |
+| `sysbench-config-prepared-multi.json` | 同上精简模板 | multi-statement批处理 | `multi_statements:true` |
+| `sysbench-config.json` | 同上精简模板 | 纯文本协议查询，完全不用prepared statement | （无） |
+| `config.json` | 单个`WHERE id IN (?)`模板 | 纯文本协议查询；上面"使用方法"一节的示例就是这个文件，演示`array`类型的参数生成器 | （无） |
+
+## 操作系统调优（高QPS场景下，connection_type为"short"时）
+```
+sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+sysctl -w net.ipv4.tcp_tw_reuse=1
+sysctl -w net.ipv4.tcp_fin_timeout=10
+sysctl -w net.netfilter.nf_conntrack_max=1048576
+sysctl -w net.netfilter.nf_conntrack_buckets=262144
+
+ulimit -n 1048576
+echo "* soft nofile 1048576" >> /etc/security/limits.conf
+echo "* hard nofile 1048576" >> /etc/security/limits.conf
+
+# 追加到 /etc/systemd/system.conf 和 /etc/systemd/user.conf
+DefaultLimitNOFILE=1048576
+# 重启 systemd-logind：
+systemctl restart systemd-logind
+```
