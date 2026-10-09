@@ -14,10 +14,48 @@ type Config struct {
 	UseTransaction        bool   `json:"use_transaction"`
 	UsePreparedStatements bool   `json:"use_prepared_statements,omitempty"`
 	// MultiStatements, when true, sends one whole transaction (every
-	// template/repeat's PREPARE+EXECUTE) as a single multi-statement round
-	// trip instead of one round trip per statement. Requires
-	// use_transaction and use_prepared_statements to both be true.
-	MultiStatements bool       `json:"multi_statements,omitempty"`
+	// template/repeat's statement) as a single multi-statement round trip
+	// instead of one round trip per statement. Requires use_transaction and
+	// use_prepared_statements to both be true.
+	MultiStatements bool `json:"multi_statements,omitempty"`
+	// MultiStatementsMode selects how a multi-statement batch is rendered,
+	// only meaningful together with multi_statements:
+	//   - "prepared_cache" (default): every statement goes through
+	//     PREPARE/EXECUTE, and a statement already PREPAREd earlier on this
+	//     connection is reused instead of PREPAREd again (tidb-multistmt's
+	//     PreparedCache).
+	//   - "raw": no PREPARE/EXECUTE at all — every statement's args are
+	//     substituted directly into the SQL text as literals, and the whole
+	//     transaction is sent as one semicolon-joined COM_QUERY.
+	MultiStatementsMode string `json:"multi_statements_mode,omitempty"`
+	// FixPreparedStatementReuse, when true (only meaningful for the non-multi,
+	// use_transaction+use_prepared_statements path), avoids a database/sql
+	// stdlib edge case that silently defeats stmtCache's "prepare once,
+	// execute many" intent: wrapping a *sql.Stmt obtained from
+	// (*sql.Conn).PrepareContext in (*sql.Tx).StmtContext always re-PREPAREs
+	// (see database/sql's own comment on stmt.cg != nil in Tx.StmtContext)
+	// and really DEALLOCATEs on commit, because that Stmt's cg field is the
+	// *sql.Conn, not nil. With this on, BEGIN/COMMIT are sent as plain text
+	// on the same connection (no *sql.Tx at all) and the cached *sql.Stmt is
+	// called directly, so a statement is PREPAREd once and EXECUTEd many
+	// times for as long as the connection lives, same as the multi_statements
+	// path already gets via PreparedCache.
+	FixPreparedStatementReuse bool `json:"fix_prepared_statement_reuse,omitempty"`
+	// PipelinedBinary, when true, renders a transaction the same way
+	// multi_statements does (same template rendering) but sends it via
+	// github.com/dulao5/tidb-binary-multistmt instead: pipelined binary
+	// COM_STMT_EXECUTE over a hijacked connection, writing all of a
+	// transaction's EXECUTE packets back-to-back before reading any
+	// response, instead of go-sql-driver's normal
+	// one-write-one-read-per-statement path. Only pessimistic transactions
+	// are supported: BEGIN is sent before the pipelined batch, and
+	// COMMIT/ROLLBACK is decided only after every response in the batch
+	// has been read (a statement failing mid-pipeline does not stop already
+	// in-flight statements from executing — see worker/pipelined_binary.go's
+	// package doc comment, and tidb-binary-multistmt's own README). Ignores
+	// use_transaction/use_prepared_statements/multi_statements/
+	// fix_prepared_statement_reuse.
+	PipelinedBinary bool       `json:"pipelined_binary,omitempty"`
 	Templates       []Template `json:"templates"`
 }
 

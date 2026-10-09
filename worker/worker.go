@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dulao5/tidb-binary-multistmt"
+	"github.com/dulao5/tidb-multistmt"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -24,16 +26,33 @@ type Worker struct {
 	useTX           bool
 	usePrepared     bool
 	multiStatements bool
+	// multiStatementsRaw selects multi-statement mode's "raw" rendering
+	// (literal args inlined into SQL text, no PREPARE/EXECUTE at all)
+	// instead of the default PreparedCache-backed one. See
+	// config.Config.MultiStatementsMode.
+	multiStatementsRaw bool
+	// fixPreparedStatementReuse selects the non-multi path's fixed
+	// prepared-statement reuse (BEGIN/COMMIT as plain text, no *sql.Tx
+	// wrapping a cached *sql.Stmt) instead of the default (buggy, see
+	// config.Config.FixPreparedStatementReuse's doc comment) tx.StmtContext
+	// path.
+	fixPreparedStatementReuse bool
+	// pipelinedBinary selects the raw-protocol pipelined-EXECUTE path
+	// instead of any of the above. See config.Config.PipelinedBinary and
+	// pipelined_binary.go's package doc comment.
+	pipelinedBinary bool
 	isShortConn     bool
 	rate            int
 	db              *sql.DB
 
-	// multiStmtNames maps a rendered SQL shape to the SQL-level PREPARE
-	// name issued for it (e.g. "PREPARE ps1 FROM '...'"), so multi-statement
-	// mode only ever emits one PREPARE per shape per connection, same as
-	// stmtCache does for the binary-protocol path.
-	multiStmtNames map[string]string
-	multiStmtNext  int
+	// preparedCache gives multi-statement mode the same per-connection
+	// PREPARE reuse stmtCache gives the binary-protocol path, but keyed by
+	// the underlying physical connection (via tidb-multistmt's
+	// PreparedCache) rather than by this Worker object — needed because
+	// connection_type "short" hands out a fresh *sql.Conn from the pool
+	// every session, and a prepared statement is only valid on the
+	// specific physical connection it was PREPAREd on.
+	preparedCache *multistmt.PreparedCache
 
 	// longConn is the one persistent *sql.Conn reused across every
 	// session/transaction when connection_type isn't "short". Prepared
@@ -54,6 +73,12 @@ type Worker struct {
 	// template is only ever prepared once per underlying connection and
 	// reused (via tx.StmtContext) for as long as that connection lives.
 	stmtCache map[string]*sql.Stmt
+
+	// rawDB/rawConn back the pipelinedBinary path only; see
+	// pipelined_binary.go. rawDB is capped at maxConns=1 (see New) — this
+	// worker only ever owns one physical connection via it at a time.
+	rawDB   *binarymultistmt.DB
+	rawConn *binarymultistmt.Conn
 }
 
 // New creates a new Worker.
@@ -117,22 +142,50 @@ func New(id int, cfg *config.Config) (*Worker, error) {
 	if cfg.MultiStatements && (!cfg.UseTransaction || !cfg.UsePreparedStatements) {
 		return nil, fmt.Errorf("multi_statements requires use_transaction and use_prepared_statements to both be true")
 	}
+	if cfg.FixPreparedStatementReuse && (cfg.MultiStatements || !cfg.UseTransaction || !cfg.UsePreparedStatements) {
+		return nil, fmt.Errorf("fix_prepared_statement_reuse requires use_transaction and use_prepared_statements to both be true, and multi_statements to be false")
+	}
 
-	return &Worker{
-		id:              id,
-		dbConnStr:       cfg.DBConnStr,
-		templates:       cfg.Templates,
-		generators:      gens,
-		useTX:           cfg.UseTransaction,
-		usePrepared:     cfg.UsePreparedStatements,
-		multiStatements: cfg.MultiStatements,
-		isShortConn:     cfg.ConnectionType == "short",
-		rate:            cfg.RatePerThread,
-		db:              db,
-		connVars:        make(map[string]interface{}),
-		stmtCache:       make(map[string]*sql.Stmt),
-		multiStmtNames:  make(map[string]string),
-	}, nil
+	multiStatementsRaw := false
+	switch cfg.MultiStatementsMode {
+	case "", "prepared_cache":
+		// default
+	case "raw":
+		multiStatementsRaw = true
+	default:
+		return nil, fmt.Errorf("multi_statements_mode must be %q or %q, got %q", "prepared_cache", "raw", cfg.MultiStatementsMode)
+	}
+
+	w := &Worker{
+		id:                        id,
+		dbConnStr:                 cfg.DBConnStr,
+		templates:                 cfg.Templates,
+		generators:                gens,
+		useTX:                     cfg.UseTransaction,
+		usePrepared:               cfg.UsePreparedStatements,
+		multiStatements:           cfg.MultiStatements,
+		multiStatementsRaw:        multiStatementsRaw,
+		fixPreparedStatementReuse: cfg.FixPreparedStatementReuse,
+		pipelinedBinary:           cfg.PipelinedBinary,
+		isShortConn:               cfg.ConnectionType == "short",
+		rate:                      cfg.RatePerThread,
+		db:                        db,
+		connVars:                  make(map[string]interface{}),
+		stmtCache:                 make(map[string]*sql.Stmt),
+		preparedCache:             multistmt.NewPreparedCache(0, 0),
+	}
+	if cfg.PipelinedBinary {
+		// maxConns=1: this worker only ever drives one physical connection
+		// through w.rawDB, reused across sessions for as long as the
+		// worker lives — see acquireRawConn in pipelined_binary.go.
+		rawDB, err := binarymultistmt.Open(cfg.DBConnStr, 1)
+		if err != nil {
+			log.Printf("Worker %d: ERROR failed to open pipelined-binary connection pool: %v", id, err)
+			return nil, err
+		}
+		w.rawDB = rawDB
+	}
+	return w, nil
 }
 
 // getOrPrepareStmt returns a cached prepared statement for the given SQL
@@ -259,8 +312,20 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) runSession(ctx context.Context) {
+	if w.pipelinedBinary {
+		w.runSessionPipelinedBinary(ctx)
+		return
+	}
 	if w.multiStatements {
-		w.runSessionMultiStatement(ctx)
+		if w.multiStatementsRaw {
+			w.runSessionMultiStatementRaw(ctx)
+		} else {
+			w.runSessionMultiStatement(ctx)
+		}
+		return
+	}
+	if w.fixPreparedStatementReuse {
+		w.runSessionFixedPrepared(ctx)
 		return
 	}
 
@@ -280,7 +345,7 @@ func (w *Worker) runSession(ctx context.Context) {
 	sessionFailed := false
 	defer func() {
 		if sessionFailed && !w.isShortConn {
-			w.longConn = nil
+			w.dropLongConn()
 			w.stmtCache = make(map[string]*sql.Stmt)
 		}
 	}()
@@ -326,7 +391,15 @@ func (w *Worker) runSession(ctx context.Context) {
 			}
 
 			literalSQL, bindArgs := splitLiteralAndBindArgs(tmpl.SQL, tmpl.Params, args)
-			finalSQL, finalArgs := handleArrayParams(literalSQL, bindArgs)
+			finalSQL, finalArgs, eerr := multistmt.ExpandIn(literalSQL, bindArgs)
+			if eerr != nil {
+				log.Printf("Worker %d: ERROR %v", w.id, eerr)
+				if w.useTX {
+					_ = tx.Rollback()
+				}
+				sessionFailed = true
+				return
+			}
 
 			isSelect := strings.HasPrefix(strings.TrimSpace(strings.ToUpper(finalSQL)), "SELECT")
 
@@ -415,37 +488,17 @@ func (w *Worker) acquireConn(ctx context.Context) (*sql.Conn, bool, error) {
 	return w.longConn, false, nil
 }
 
-func handleArrayParams(sql string, args []interface{}) (string, []interface{}) {
-	finalSQL := ""
-	sqlParts := strings.Split(sql, "?")
-
-	if len(sqlParts)-1 != len(args) {
-		return sql, args
+// dropLongConn discards w.longConn after a session on it failed, so the
+// next acquireConn call opens a fresh one instead of reusing something
+// stale. It also closes the old *sql.Conn — not just forgetting Worker's
+// own reference to it — because db.SetMaxOpenConns(1) means the pool won't
+// hand out a replacement connection until this one is actually released;
+// skipping Close here would make the very next acquireConn call (or
+// w.db.Conn(ctx) in general) block forever waiting for a connection slot
+// that will never free up on its own.
+func (w *Worker) dropLongConn() {
+	if w.longConn != nil {
+		w.longConn.Close()
+		w.longConn = nil
 	}
-
-	newArgs := make([]interface{}, 0, len(args))
-	for i, arg := range args {
-		finalSQL += sqlParts[i]
-		arr, ok := arg.([]interface{})
-		if ok {
-			if len(arr) == 0 {
-				// Handle empty array case, maybe return an error or a specific SQL syntax
-				// For now, we just add a single NULL placeholder to avoid syntax errors.
-				finalSQL += "?"
-				newArgs = append(newArgs, nil)
-				continue
-			}
-			placeholders := strings.Repeat("?,", len(arr))
-			placeholders = strings.TrimSuffix(placeholders, ",")
-			finalSQL += placeholders
-			newArgs = append(newArgs, arr...)
-		} else {
-			finalSQL += "?"
-			newArgs = append(newArgs, arg)
-		}
-	}
-	finalSQL += sqlParts[len(sqlParts)-1]
-
-	// fmt.Println(finalSQL, newArgs) // Debug print
-	return finalSQL, newArgs
 }

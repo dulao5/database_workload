@@ -183,3 +183,35 @@ func TestSplitLiteralAndBindArgs_LiteralSubstitutesIntoSQL(t *testing.T) {
 		t.Fatalf("expected only the non-literal arg to remain, got %v", gotArgs)
 	}
 }
+
+func TestNew_FixPreparedStatementReuseRequiresTxAndPreparedAndNotMulti(t *testing.T) {
+	base := &config.Config{
+		Concurrency:               1,
+		DBConnStr:                 "root:@tcp(127.0.0.1:4000)/test",
+		FixPreparedStatementReuse: true,
+		Templates:                 []config.Template{{SQL: "SELECT 1"}},
+	}
+
+	cases := []struct {
+		name string
+		mod  func(*config.Config)
+	}{
+		{"missing use_transaction", func(c *config.Config) { c.UsePreparedStatements = true }},
+		{"missing use_prepared_statements", func(c *config.Config) { c.UseTransaction = true }},
+		{"multi_statements set", func(c *config.Config) {
+			c.UseTransaction = true
+			c.UsePreparedStatements = true
+			c.MultiStatements = true
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := *base
+			tc.mod(&cfg)
+			if _, err := New(1, &cfg); err == nil {
+				t.Fatalf("expected an error for %s", tc.name)
+			}
+		})
+	}
+}
