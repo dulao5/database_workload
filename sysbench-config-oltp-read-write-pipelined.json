@@ -1,0 +1,100 @@
+{
+  "concurrency": 40,
+  "db_conn_str": "root:@tcp(127.0.0.1:4000)/test?parseTime=true&timeout=3s&readTimeout=3s&writeTimeout=3s",
+  "use_transaction": true,
+  "use_prepared_statements": true,
+  "multi_statements": true,
+  "pipelined_binary": true,
+  "rate_per_thread": 1,
+  "connection_type": "long",
+  "comment": "sysbench oltp-read-write, ported from https://raw.githubusercontent.com/dulao5/tiny-sysbench-php/refs/heads/main/app/public/index.php . OLTP_POINT_SELECTS/OLTP_SIMPLE_RANGES/etc are hardcoded to the reference's defaults (10/1/1/1/1/1/1), not dynamically configurable yet.",
+  "templates": [
+    {
+      "sql": "",
+      "comment": "pick one random table number and keep it for the whole connection's lifetime (OLTP_TABLE_COUNT=100)",
+      "params": [
+        { "type": "number", "random_mode": "uniform", "min": 1, "max": 100, "save_as": "tableNum", "scope": "connection" }
+      ]
+    },
+    {
+      "sql": "SELECT c FROM sbtest? WHERE id = ?",
+      "comment": "OLTP_POINT_SELECTS=10",
+      "repeat": 10,
+      "params": [
+        { "type": "ref", "ref_name": "tableNum", "literal": true },
+        { "type": "number", "random_mode": "uniform", "min": 1, "max": 10000 }
+      ]
+    },
+    {
+      "sql": "SELECT c FROM sbtest? WHERE id BETWEEN ? AND ?",
+      "comment": "OLTP_SIMPLE_RANGES=1, OLTP_RANGE_SIZE=100",
+      "params": [
+        { "type": "ref", "ref_name": "tableNum", "literal": true },
+        { "type": "number", "random_mode": "uniform", "min": 1, "max": 10000, "save_as": "simpleRangeFrom" },
+        { "type": "ref", "ref_name": "simpleRangeFrom", "offset": 100 }
+      ]
+    },
+    {
+      "sql": "SELECT SUM(c) FROM sbtest? WHERE id BETWEEN ? AND ?",
+      "comment": "OLTP_SUM_RANGES=1",
+      "params": [
+        { "type": "ref", "ref_name": "tableNum", "literal": true },
+        { "type": "number", "random_mode": "uniform", "min": 1, "max": 10000, "save_as": "sumRangeFrom" },
+        { "type": "ref", "ref_name": "sumRangeFrom", "offset": 100 }
+      ]
+    },
+    {
+      "sql": "SELECT c FROM sbtest? WHERE id BETWEEN ? AND ? ORDER BY c",
+      "comment": "OLTP_ORDER_RANGES=1",
+      "params": [
+        { "type": "ref", "ref_name": "tableNum", "literal": true },
+        { "type": "number", "random_mode": "uniform", "min": 1, "max": 10000, "save_as": "orderRangeFrom" },
+        { "type": "ref", "ref_name": "orderRangeFrom", "offset": 100 }
+      ]
+    },
+    {
+      "sql": "SELECT DISTINCT c FROM sbtest? WHERE id BETWEEN ? AND ?",
+      "comment": "OLTP_DISTINCT_RANGES=1",
+      "params": [
+        { "type": "ref", "ref_name": "tableNum", "literal": true },
+        { "type": "number", "random_mode": "uniform", "min": 1, "max": 10000, "save_as": "distinctRangeFrom" },
+        { "type": "ref", "ref_name": "distinctRangeFrom", "offset": 100 }
+      ]
+    },
+    {
+      "sql": "UPDATE sbtest? SET k = k + 1 WHERE id = ?",
+      "comment": "OLTP_INDEX_UPDATES=1",
+      "params": [
+        { "type": "ref", "ref_name": "tableNum", "literal": true },
+        { "type": "number", "random_mode": "uniform", "min": 1, "max": 10000 }
+      ]
+    },
+    {
+      "sql": "UPDATE sbtest? SET c = ? WHERE id = ?",
+      "comment": "OLTP_NON_INDEX_UPDATES=1, SBTEST_COLUMN_C_LENGTH=120",
+      "params": [
+        { "type": "ref", "ref_name": "tableNum", "literal": true },
+        { "type": "string", "random_mode": "random_string", "length": 120 },
+        { "type": "number", "random_mode": "uniform", "min": 1, "max": 10000 }
+      ]
+    },
+    {
+      "sql": "DELETE FROM sbtest? WHERE id = ?",
+      "params": [
+        { "type": "ref", "ref_name": "tableNum", "literal": true },
+        { "type": "number", "random_mode": "uniform", "min": 1, "max": 10000, "save_as": "delInsID" }
+      ]
+    },
+    {
+      "sql": "INSERT INTO sbtest? (id, k, c, pad) VALUES (?, ?, ?, ?)",
+      "comment": "SBTEST_COLUMN_C_LENGTH=120, SBTEST_COLUMN_PAD_LENGTH=60",
+      "params": [
+        { "type": "ref", "ref_name": "tableNum", "literal": true },
+        { "type": "ref", "ref_name": "delInsID" },
+        { "type": "number", "random_mode": "uniform", "min": 1, "max": 10000 },
+        { "type": "string", "random_mode": "random_string", "length": 120 },
+        { "type": "string", "random_mode": "random_string", "length": 60 }
+      ]
+    }
+  ]
+}
