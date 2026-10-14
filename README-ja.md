@@ -245,3 +245,36 @@ database_workload -config config.json
     }
 }
 ```
+
+## Sysbench OLTP 設定ファイル
+
+このリポジトリには、すぐ使えるいくつかの`sysbench-config-*.json`ファイル（それに加えて、より古い`config.json`/`sysbench-config.json`）が同梱されており、それぞれ異なる実行パスを使うため、同じ並行数/スループットで互いに比較ベンチマークできます。「フル版」oltp-read-writeファミリー（4種類のSELECTバリエーション＋UPDATE×2＋DELETE＋INSERT、sysbench自身の`oltp_read_write.lua`を移植したもの）が、fix-prepared／multi-statement／pipelined-binaryの比較テストで実際に使われているものです。`*-prepared*`／`sysbench-config.json`／`config.json`は、もっと早い時期の小さなプロトタイプで、ローカルでの簡単な動作確認用に残してあるだけで、本格的な比較ベンチマークには使いません。
+
+| ファイル | テンプレート | 実行モード | baselineに対して追加されるフラグ |
+|---|---|---|---|
+| `sysbench-config-oltp-read-write.json` | フル版oltp-read-write（10テンプレート） | 普通の`database/sql`prepared statement。`(*sql.Tx).StmtContext`経由——これが「素朴な」baselineで、実は毎回黙って再PREPAREしてしまう（`config/config.go`の`FixPreparedStatementReuse`のdocコメント参照）。そのためベンチマークで対照に使う「fix-prepared」baselineとは**別物**なので注意 | `use_prepared_statements:true`、`multi_statements:false` |
+| `sysbench-config-oltp-read-write-fixprepared.json` | 同上 | **fix-prepared**：各ステートメントを一度だけPREPAREし、コネクションの寿命が続く限り使い回す（上記のstdlibの`Tx.StmtContext`再PREPARE問題を回避）——他のすべてのモードがこれと比較される基準 | `fix_prepared_statement_reuse:true`を追加 |
+| `sysbench-config-oltp-read-write-multi.json` | 同上 | **multi-statement**：トランザクション全体を`tidb-multistmt`によるテキストプロトコルの1往復（`SET`マーカー＋`EXECUTE ps USING ...`）にまとめる | `multi_statements:true` |
+| `sysbench-config-oltp-read-write-pipelined.json` | 同上 | **binary-multistmt（pipelined）**：トランザクション全体を`github.com/dulao5/tidb-binary-multistmt`経由でパイプライン化——バイナリの`COM_STMT_EXECUTE`パケットを連続して書き込み、1往復で済ませる。テキストプロトコルの`SET`マーカーは不要 | `pipelined_binary:true`を追加（`multi_statements`も一貫性のため設定してあるが、このモードでは無視される——`PipelinedBinary`のdocコメント参照） |
+| `sysbench-config-prepared.json` | 最小限の2テンプレートのプロトタイプ（テーブル選択＋バッチpoint-selectのみ。フル版sysbench移植より前のもの） | 普通のprepared statement（上のフル版baselineと同じ注意点あり） | `use_prepared_statements:true`、`multi_statements:false` |
+| `sysbench-config-prepared-multi.json` | 同じ最小限のテンプレート | multi-statementバッチ処理 | `multi_statements:true` |
+| `sysbench-config.json` | 同じ最小限のテンプレート | 純粋なテキストプロトコルのクエリ、prepared statementは一切使わない | （なし） |
+| `config.json` | `WHERE id IN (?)`の単一テンプレート | 純粋なテキストプロトコルのクエリ。上の「使い方」セクションの例で使われているファイルで、`array`型のパラメータジェネレーターのデモ | （なし） |
+
+## OSチューニング（connection_typeが"short"の高QPSシナリオ向け）
+```
+sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+sysctl -w net.ipv4.tcp_tw_reuse=1
+sysctl -w net.ipv4.tcp_fin_timeout=10
+sysctl -w net.netfilter.nf_conntrack_max=1048576
+sysctl -w net.netfilter.nf_conntrack_buckets=262144
+
+ulimit -n 1048576
+echo "* soft nofile 1048576" >> /etc/security/limits.conf
+echo "* hard nofile 1048576" >> /etc/security/limits.conf
+
+# /etc/systemd/system.conf と /etc/systemd/user.conf に追記
+DefaultLimitNOFILE=1048576
+# systemd-logind を再起動：
+systemctl restart systemd-logind
+```
