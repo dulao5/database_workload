@@ -4,6 +4,8 @@ github.com/dulao5/tidb-binary-multistmt v0.0.0-20261009024245-76784f8442b7 h1:0/
 github.com/dulao5/tidb-binary-multistmt v0.0.0-20261009024245-76784f8442b7/go.mod h1:YW6CMz3ZeBiPxJnHP2k4nfggGVICEB9Lre3YWckwpzo=
 github.com/dulao5/tidb-binary-multistmt v0.0.0-20261009071903-798857caf3e6 h1:oUa8H30fzCcLhD8zkV/7P3T8cAklH4dN/tTfhLcWboE=
 github.com/dulao5/tidb-binary-multistmt v0.0.0-20261009071903-798857caf3e6/go.mod h1:YW6CMz3ZeBiPxJnHP2k4nfggGVICEB9Lre3YWckwpzo=
+github.com/dulao5/tidb-binary-multistmt v0.0.0-20261014060844-ce7176ed7f3e h1:Ccc9xAD0UToa8Y4U1IMX09w78FTmpCmgn2DbjKF3DXM=
+github.com/dulao5/tidb-binary-multistmt v0.0.0-20261014060844-ce7176ed7f3e/go.mod h1:YW6CMz3ZeBiPxJnHP2k4nfggGVICEB9Lre3YWckwpzo=
 github.com/dulao5/tidb-multistmt v0.0.0-20261006120221-c62eea454d24 h1:8A/qmWowhlMDSXi+e38uP4c9rTSB/UMOgwwzWeMKyxg=
 github.com/dulao5/tidb-multistmt v0.0.0-20261006120221-c62eea454d24/go.mod h1:XtEap/+++yhZOufdDkFUzPt0em2cMVaBl5PhAdch6TQ=
 github.com/go-sql-driver/mysql v1.9.3 h1:U/N249h2WzJ3Ukj8SowVFjdtZKfu9vlLZxjPXV1aweo=
