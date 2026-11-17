@@ -1,0 +1,113 @@
+{
+  "concurrency": 40,
+  "db_conn_str": "root:@tcp(127.0.0.1:4000)/test?parseTime=true&timeout=3s&readTimeout=3s&writeTimeout=3s",
+  "rate_per_thread": 1,
+  "connection_type": "long",
+  "comment": "like sysbench oltp_write_only: BEGIN, index update, non-index update, delete + insert, COMMIT",
+  "use_transaction": true,
+  "use_prepared_statements": true,
+  "fix_prepared_statement_reuse": true,
+  "templates": [
+    {
+      "sql": "",
+      "comment": "pick one random table (1..100 = sysbench --tables) and keep it for the whole connection",
+      "params": [
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 100,
+          "save_as": "tableNum",
+          "scope": "connection"
+        }
+      ]
+    },
+    {
+      "sql": "UPDATE sbtest? SET k = k + 1 WHERE id = ?",
+      "comment": "index update",
+      "params": [
+        {
+          "type": "ref",
+          "ref_name": "tableNum",
+          "literal": true
+        },
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 10000
+        }
+      ]
+    },
+    {
+      "sql": "UPDATE sbtest? SET c = ? WHERE id = ?",
+      "comment": "non-index update, c is CHAR(120)",
+      "params": [
+        {
+          "type": "ref",
+          "ref_name": "tableNum",
+          "literal": true
+        },
+        {
+          "type": "string",
+          "random_mode": "random_string",
+          "length": 120
+        },
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 10000
+        }
+      ]
+    },
+    {
+      "sql": "DELETE FROM sbtest? WHERE id = ?",
+      "comment": "delete a row, then insert it back with the same id",
+      "params": [
+        {
+          "type": "ref",
+          "ref_name": "tableNum",
+          "literal": true
+        },
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 10000,
+          "save_as": "delInsID"
+        }
+      ]
+    },
+    {
+      "sql": "INSERT INTO sbtest? (id, k, c, pad) VALUES (?, ?, ?, ?)",
+      "params": [
+        {
+          "type": "ref",
+          "ref_name": "tableNum",
+          "literal": true
+        },
+        {
+          "type": "ref",
+          "ref_name": "delInsID"
+        },
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 10000
+        },
+        {
+          "type": "string",
+          "random_mode": "random_string",
+          "length": 120
+        },
+        {
+          "type": "string",
+          "random_mode": "random_string",
+          "length": 60
+        }
+      ]
+    }
+  ]
+}

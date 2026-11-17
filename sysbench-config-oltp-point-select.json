@@ -1,0 +1,42 @@
+{
+  "concurrency": 40,
+  "db_conn_str": "root:@tcp(127.0.0.1:4000)/test?parseTime=true&timeout=3s&readTimeout=3s&writeTimeout=3s",
+  "rate_per_thread": 1,
+  "connection_type": "long",
+  "comment": "like sysbench oltp_point_select: one point select, no transaction",
+  "use_transaction": false,
+  "use_prepared_statements": true,
+  "templates": [
+    {
+      "sql": "",
+      "comment": "pick one random table (1..100 = sysbench --tables) and keep it for the whole connection",
+      "params": [
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 100,
+          "save_as": "tableNum",
+          "scope": "connection"
+        }
+      ]
+    },
+    {
+      "sql": "SELECT c FROM sbtest? WHERE id = ?",
+      "comment": "point select; id range 1..10000 = sysbench --table-size",
+      "params": [
+        {
+          "type": "ref",
+          "ref_name": "tableNum",
+          "literal": true
+        },
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 10000
+        }
+      ]
+    }
+  ]
+}
