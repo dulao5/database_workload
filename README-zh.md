@@ -8,7 +8,7 @@
 它能模拟的东西：
 
 - **连接方式**：长连接（带连接池的应用）或每个事务新建连接（无连接池的应用）。
-- **SQL 的发送方式**：普通文本查询、服务端 prepared statement、把整个事务打包成一次往返（multi-statement / pipelined binary）。
+- **SQL 的发送方式**：普通文本查询、服务端 prepared statement、把整个事务打包成一两次往返发出去（multi-statement / pipelined binary）。
 - **参数的分布**：均匀、幂律（热点）、分区幂律，以及"一个事务里多条 SQL 共用同一个随机 id""一个连接固定用一张表"之类的关联。
 
 它**不做**的事：
@@ -108,7 +108,7 @@ sysbench oltp_read_write \
 | `fix_prepared_statement_reuse` | bool | `false` | 修正"每个事务都重新 PREPARE 再 CLOSE"的问题，让一条语句在一个连接上只 PREPARE 一次、之后反复 EXECUTE。详见下文。 |
 | `multi_statements` | bool | `false` | 把整个事务拼成**一次**文本协议请求发出去（一次网络往返）。详见下文。 |
 | `multi_statements_mode` | string | `"prepared_cache"` | 只在 `multi_statements: true` 时有意义：`"prepared_cache"` 或 `"raw"`。 |
-| `pipelined_binary` | bool | `false` | 用二进制协议把整个事务的 EXECUTE 包连续写出去、再一起读回（一次往返）。详见下文。 |
+| `pipelined_binary` | bool | `false` | 用二进制协议把 BEGIN 和整个事务的 EXECUTE 包连续写出去、读回结果后再发 COMMIT（两次往返）。详见下文。 |
 | `templates` | array | （必填） | SQL 模板列表，见[第 6 节](#6-sql-模板templates)。 |
 
 JSON 里不认识的字段会被忽略，所以可以随意写 `"comment"` 做注释（参考配置里就是这么用的）。
@@ -157,8 +157,9 @@ JSON 里不认识的字段会被忽略，所以可以随意写 `"comment"` 做�
 ### `pipelined_binary`
 
 **二进制协议版的 multi-statement。** 用 [`github.com/dulao5/tidb-binary-multistmt`](https://github.com/dulao5/tidb-binary-multistmt) 实现：
-先发 BEGIN，然后把整个事务的 `COM_STMT_EXECUTE` 包一口气连续写出去，再依次读回所有结果，最后根据结果 COMMIT 或 ROLLBACK。
-一次网络往返，没有 `SET @…` 文本开销，语句在连接上也只 PREPARE 一次。
+把 BEGIN 和整个事务的 `COM_STMT_EXECUTE` 包作为同一批一口气连续写出去，再依次读回所有结果；全部成功就再发 COMMIT，有失败就发 ROLLBACK。
+所以每个事务是 **2 次网络往返**（一批 BEGIN + EXECUTE，再一次 COMMIT / ROLLBACK），没有 `SET @…` 文本开销。
+语句在连接上只 PREPARE 一次（第一次遇到时，在写出这一批之前先 PREPARE）。
 
 - 只支持悲观事务：中途某条语句失败时，已经写出去的后续语句仍会被执行，靠最后整体 ROLLBACK 兜底。
 - 开启后 **`use_transaction` / `use_prepared_statements` / `multi_statements` / `fix_prepared_statement_reuse` / `connection_type` 都不再起作用**：
@@ -172,17 +173,67 @@ JSON 里不认识的字段会被忽略，所以可以随意写 `"comment"` 做�
 |---|---|---|---|
 | 文本，无事务 | `use_transaction:false`，`use_prepared_statements:false`，DSN 加 `interpolateParams=true` | N | 0 |
 | 文本 + 事务 | `use_transaction:true`，`use_prepared_statements:false`，DSN 加 `interpolateParams=true` | N + 2 | 0 |
+| 文本，DSN **没有** `interpolateParams=true`（Go 的默认） | `use_prepared_statements:false` | 2N（开事务再 +2）：驱动对每条带参数的语句自动 PREPARE + EXECUTE，然后 CLOSE | N |
 | prepared（朴素版） | `use_transaction:true`，`use_prepared_statements:true` | 2N + 2（每条都 PREPARE + EXECUTE，提交时再 CLOSE） | N |
 | **prepared（修正版，基线）** | 上面再加 `fix_prepared_statement_reuse:true` | N + 2 | 仅第一次 |
 | multi-statement | `use_transaction:true`，`use_prepared_statements:true`，`multi_statements:true` | 1 | 仅第一次（文本 `PREPARE`） |
 | multi-statement raw | 上面再加 `multi_statements_mode:"raw"` | 1 | 0 |
-| pipelined binary | `pipelined_binary:true` | 1（BEGIN 另算一次） | 仅第一次 |
+| pipelined binary | `pipelined_binary:true` | 2（BEGIN + 全部 EXECUTE 一批写出，然后 COMMIT 或 ROLLBACK） | 仅第一次 |
 
 "仅第一次"指的是长连接下；短连接每个 session 都是新连接，自然每次都要重新 PREPARE。
+
+### 4.1 常见语言 / 框架对应哪种配置
+
+下表按各驱动的**默认行为**对应。实际行为取决于驱动参数和代码写法，表里的"条件"列请对照你的应用确认。
+另外，`use_transaction` 要看应用代码是否显式开事务：开了就设 `true`，靠 autocommit 一条一条执行就设 `false`。
+表中的"修正版 prepared"指开事务的情况；应用不开事务时，请改用 `use_prepared_statements:true` + `use_transaction:false`（长连接下同样是每个连接只 PREPARE 一次）。
+
+| 语言 / 框架 | 条件 | 驱动实际做的事 | 本工具的配置 |
+|---|---|---|---|
+| Go（`database/sql` + go-sql-driver/mysql） | 默认：`db.Query(sql, args...)`，DSN 没有 `interpolateParams` | 每条带参数的语句都 PREPARE → EXECUTE → CLOSE | `long`，`use_prepared_statements:false`，DSN **不加** `interpolateParams=true` |
+| Go | DSN 加 `interpolateParams=true` | 客户端拼好 SQL，文本协议 | `long`，`use_prepared_statements:false`，DSN 加 `interpolateParams=true` |
+| Go | 在 `*sql.Conn` 上 `PrepareContext`，再在事务里用 `tx.StmtContext(stmt)` | 每个事务都重新 PREPARE，提交时 CLOSE | `long`，`use_transaction:true`，`use_prepared_statements:true`（朴素版） |
+| Go | `db.Prepare`（在 `*sql.DB` 上），再在事务里用 `tx.Stmt(stmt)` | 每个连接 PREPARE 一次后复用 | 近似 `long` + 修正版 prepared |
+| Go（GORM） | `PrepareStmt: true` | 每个连接缓存 prepared statement | 近似 `long` + 修正版 prepared |
+| Java（JDBC，MySQL Connector/J） | 默认（`useServerPrepStmts=false`） | 客户端拼 SQL，文本协议 | `long`，文本，DSN 加 `interpolateParams=true` |
+| Java（JDBC） | `useServerPrepStmts=true&cachePrepStmts=true` | 服务端 prepared，每个连接缓存 | `long` + 修正版 prepared |
+| Java（JDBC） | `useServerPrepStmts=true`，不开 `cachePrepStmts` | 每次 `prepareStatement` 都 PREPARE，`close()` 时 CLOSE | `long` + 朴素版 prepared |
+| PHP（PDO） | 默认（`PDO::ATTR_EMULATE_PREPARES=true`） | 客户端模拟 prepare，文本协议；每个请求新建连接 | `short`，文本，DSN 加 `interpolateParams=true` |
+| PHP（mysqli `prepare()`，或 PDO 关闭模拟） | 每个请求新建连接 | 服务端 prepared，每个请求都重新 PREPARE | `short` + 朴素版 prepared（需 `use_transaction:true`；短连接 + prepared + 不开事务目前跑不了，见第 5 节） |
+| Python（Django） | 默认 `CONN_MAX_AGE=0`，驱动 mysqlclient / PyMySQL | 客户端拼 SQL，文本协议；每个请求结束就断开 | `short`，文本，DSN 加 `interpolateParams=true` |
+| Python（SQLAlchemy 等带连接池的） | 驱动 mysqlclient / PyMySQL | 客户端拼 SQL，文本协议 | `long`，文本，DSN 加 `interpolateParams=true` |
+| Node.js（mysql2） | `query()` | 客户端转义，文本协议 | `long`，文本，DSN 加 `interpolateParams=true` |
+| Node.js（mysql2） | `execute()` | 服务端 prepared，每个连接缓存 | `long` + 修正版 prepared |
+| Ruby on Rails（mysql2 / trilogy 适配器） | 默认 | 客户端转义，文本协议 | `long`，文本，DSN 加 `interpolateParams=true` |
+| .NET（MySqlConnector） | 默认 | 客户端替换参数，文本协议 | `long`，文本，DSN 加 `interpolateParams=true` |
+| .NET（MySqlConnector） | 调用 `MySqlCommand.Prepare()` | 服务端 prepared | `long` + 修正版 prepared |
+| Rust（sqlx） | 默认 | 服务端 prepared，每个连接缓存 | `long` + 修正版 prepared |
+| sysbench | 默认（`--db-ps-mode=auto`） | 服务端 prepared，每个连接 PREPARE 一次 | `long` + 修正版 prepared（`sysbench-config-oltp-*.json` 用的就是这种） |
+
+multi-statement 和 pipelined binary 不对应某个现成框架的默认行为，它们用来评估"如果应用把一个事务合并成一两次往返，能快多少"。
 
 ## 5. 不能一起用的组合
 
 以下结论都在 TiDB v8.5 上实际跑过确认。
+
+### 5.1 执行方式 × 连接方式
+
+这几个开关并不互相独立（multi-statement 依赖事务和 prepared，pipelined 会覆盖其他开关），所以合法的配置其实就是下面 8 种执行方式，再乘上长 / 短两种连接：
+
+| 执行方式 | 关键配置 | `long` | `short` |
+|---|---|---|---|
+| 文本，无事务 | `use_transaction:false`，`use_prepared_statements:false` | ✅ | ✅ |
+| 文本 + 事务 | `use_transaction:true`，`use_prepared_statements:false` | ✅ | ✅ |
+| prepared，无事务 | `use_transaction:false`，`use_prepared_statements:true` | ✅ | ❌ 第二次起每次失败 |
+| prepared（朴素版）+ 事务 | `use_transaction:true`，`use_prepared_statements:true` | ✅ | ✅ |
+| prepared（修正版）+ 事务 | 上面再加 `fix_prepared_statement_reuse:true` | ✅ | ❌ 第二次起每次失败 |
+| multi-statement（`prepared_cache`） | `use_transaction`、`use_prepared_statements`、`multi_statements` 都为 `true` | ✅ | ✅ |
+| multi-statement（`raw`） | 上面再加 `multi_statements_mode:"raw"` | ✅ | ✅ |
+| pipelined binary | `pipelined_binary:true` | ✅ | ⚠️ `short` 不生效，仍是长连接 |
+
+两种文本方式都分别测了 DSN 有 / 没有 `interpolateParams=true`，结果相同。
+
+### 5.2 各种出错和被忽略的情况
 
 **启动时直接报错退出：**
 
@@ -197,7 +248,7 @@ JSON 里不认识的字段会被忽略，所以可以随意写 `"comment"` 做�
 
 | 组合 | 现象 |
 |---|---|
-| `connection_type:"short"` + `fix_prepared_statement_reuse:true` | 第一个事务成功，**之后每个事务都失败**：`sql: connection is already closed`（缓存的语句还绑在已关闭的旧连接上）。短连接请不要开 `fix_prepared_statement_reuse`。 |
+| `connection_type:"short"` + 服务端 prepared，且不经过 Go 的 `*sql.Tx`：即 `fix_prepared_statement_reuse:true`，或 `use_prepared_statements:true` 但 `use_transaction:false` | 第一个 session 成功，**之后每个都失败**：`sql: connection is already closed`（缓存的语句还绑在已关闭的旧连接上）。短连接下要用 prepared，请用"朴素版 + 事务"或 multi-statement。 |
 | 表名等标识符位置用了 `?`，但参数没有 `"literal": true`，且走的是服务端 prepare（`use_prepared_statements`、`multi_statements`、`pipelined_binary`，或文本模式但 DSN 没有 `interpolateParams=true`） | `Error 1064 … syntax error`，因为 MySQL 不能把表名作为绑定参数。见 [7.6 节](#76-literal把值直接拼进-sql-文本)。 |
 | `type:"ref"` 引用了一个还没生成过的变量 | `session variable "xxx" referenced before it was saved`，每个 session 都失败。 |
 
@@ -208,7 +259,7 @@ JSON 里不认识的字段会被忽略，所以可以随意写 `"comment"` 做�
 | `pipelined_binary:true` | `use_transaction`、`use_prepared_statements`、`multi_statements`、`multi_statements_mode`、`fix_prepared_statement_reuse`、`connection_type`（总是长连接） |
 | `multi_statements_mode` 而 `multi_statements:false` | `multi_statements_mode` |
 
-**可以放心组合的**：短连接 + 文本、短连接 + 朴素 prepared、短连接 + multi-statement（两种 mode 都可以）。
+短连接下哪些能用，见 5.1 的表。
 
 ## 6. SQL 模板（templates）
 

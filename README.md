@@ -8,7 +8,7 @@ You write SQL templates and describe how each parameter is randomized; it runs N
 What it can simulate:
 
 - **How the app connects**: long-lived connections (apps with a connection pool) or a new connection per transaction (apps without one).
-- **How SQL is sent**: plain text queries, server-side prepared statements, or a whole transaction in a single round trip (multi-statement / pipelined binary).
+- **How SQL is sent**: plain text queries, server-side prepared statements, or a whole transaction in one or two round trips (multi-statement / pipelined binary).
 - **How parameters are distributed**: uniform, power-law (hotspots), partitioned power-law, plus correlations such as "several statements in one transaction share the same random id" or "each connection sticks to one table".
 
 What it does **not** do:
@@ -108,7 +108,7 @@ Just one: `-config <path>`, default `config.json`.
 | `fix_prepared_statement_reuse` | bool | `false` | Fixes "re-PREPARE and CLOSE in every transaction" so a statement is PREPAREd once per connection and EXECUTEd many times. See below. |
 | `multi_statements` | bool | `false` | Send the whole transaction as **one** text-protocol request (one round trip). See below. |
 | `multi_statements_mode` | string | `"prepared_cache"` | Only with `multi_statements: true`: `"prepared_cache"` or `"raw"`. |
-| `pipelined_binary` | bool | `false` | Write all of the transaction's binary EXECUTE packets back to back, then read all responses (one round trip). See below. |
+| `pipelined_binary` | bool | `false` | Write BEGIN and all of the transaction's binary EXECUTE packets back to back, read the responses, then send COMMIT (two round trips). See below. |
 | `templates` | array | (required) | SQL templates, see [section 6](#6-sql-templates). |
 
 Unknown JSON keys are ignored, so you can add `"comment"` anywhere (the reference configs do).
@@ -157,8 +157,9 @@ Implemented with [`github.com/dulao5/tidb-multistmt`](https://github.com/dulao5/
 ### `pipelined_binary`
 
 **The binary-protocol version of multi-statement**, implemented with [`github.com/dulao5/tidb-binary-multistmt`](https://github.com/dulao5/tidb-binary-multistmt):
-send BEGIN, write all of the transaction's `COM_STMT_EXECUTE` packets back to back, read all responses, then COMMIT or ROLLBACK based on the results.
-One round trip, no `SET @…` text overhead, and each statement is PREPAREd only once per connection.
+BEGIN and all of the transaction's `COM_STMT_EXECUTE` packets are written back to back as one batch, then all responses are read; if everything succeeded it sends COMMIT, otherwise ROLLBACK.
+So each transaction takes **2 round trips** (one for the BEGIN + EXECUTE batch, one for COMMIT / ROLLBACK), with no `SET @…` text overhead.
+Each statement is PREPAREd only once per connection (the first time it appears, before the batch is written).
 
 - Pessimistic transactions only: if a statement in the middle fails, the statements already written still execute; the final ROLLBACK cleans up.
 - When on, **`use_transaction` / `use_prepared_statements` / `multi_statements` / `fix_prepared_statement_reuse` / `connection_type` no longer matter**:
@@ -172,17 +173,67 @@ For a transaction with N statements:
 |---|---|---|---|
 | Text, no transaction | `use_transaction:false`, `use_prepared_statements:false`, DSN with `interpolateParams=true` | N | 0 |
 | Text + transaction | `use_transaction:true`, `use_prepared_statements:false`, DSN with `interpolateParams=true` | N + 2 | 0 |
+| Text, DSN **without** `interpolateParams=true` (Go's default) | `use_prepared_statements:false` | 2N (+2 with a transaction): the driver turns every statement with args into PREPARE + EXECUTE, then CLOSE | N |
 | Prepared (naive) | `use_transaction:true`, `use_prepared_statements:true` | 2N + 2 (PREPARE + EXECUTE per statement, CLOSE on commit) | N |
 | **Prepared (fixed, baseline)** | the above plus `fix_prepared_statement_reuse:true` | N + 2 | first time only |
 | Multi-statement | `use_transaction:true`, `use_prepared_statements:true`, `multi_statements:true` | 1 | first time only (text `PREPARE`) |
 | Multi-statement raw | the above plus `multi_statements_mode:"raw"` | 1 | 0 |
-| Pipelined binary | `pipelined_binary:true` | 1 (plus one for BEGIN) | first time only |
+| Pipelined binary | `pipelined_binary:true` | 2 (BEGIN + all EXECUTEs as one batch, then COMMIT or ROLLBACK) | first time only |
 
 "First time only" assumes long connections; a short connection is new every session, so it has to PREPARE again each time.
+
+### 4.1 Which settings match common languages / frameworks
+
+The table maps each driver's **default behavior**. Real behavior depends on driver options and how the code is written, so check the "Condition" column against your app.
+Set `use_transaction` according to the app code: `true` if it opens transactions explicitly, `false` if it relies on autocommit one statement at a time.
+"Fixed prepared" in the table means with a transaction; for an app without transactions use `use_prepared_statements:true` + `use_transaction:false` instead (on a long connection that also PREPAREs only once per connection).
+
+| Language / framework | Condition | What the driver actually does | Settings in this tool |
+|---|---|---|---|
+| Go (`database/sql` + go-sql-driver/mysql) | default: `db.Query(sql, args...)`, no `interpolateParams` in the DSN | PREPARE → EXECUTE → CLOSE for every statement with args | `long`, `use_prepared_statements:false`, DSN **without** `interpolateParams=true` |
+| Go | DSN with `interpolateParams=true` | client builds the SQL, text protocol | `long`, `use_prepared_statements:false`, DSN with `interpolateParams=true` |
+| Go | `PrepareContext` on a `*sql.Conn`, then `tx.StmtContext(stmt)` inside a transaction | re-PREPAREs in every transaction, CLOSEs on commit | `long`, `use_transaction:true`, `use_prepared_statements:true` (naive) |
+| Go | `db.Prepare` (on the `*sql.DB`), then `tx.Stmt(stmt)` inside a transaction | PREPAREs once per connection, then reuses | roughly `long` + fixed prepared |
+| Go (GORM) | `PrepareStmt: true` | caches prepared statements per connection | roughly `long` + fixed prepared |
+| Java (JDBC, MySQL Connector/J) | default (`useServerPrepStmts=false`) | client builds the SQL, text protocol | `long`, text, DSN with `interpolateParams=true` |
+| Java (JDBC) | `useServerPrepStmts=true&cachePrepStmts=true` | server-side prepared, cached per connection | `long` + fixed prepared |
+| Java (JDBC) | `useServerPrepStmts=true` without `cachePrepStmts` | PREPARE on every `prepareStatement`, CLOSE on `close()` | `long` + naive prepared |
+| PHP (PDO) | default (`PDO::ATTR_EMULATE_PREPARES=true`) | client-side emulated prepare, text protocol; new connection per request | `short`, text, DSN with `interpolateParams=true` |
+| PHP (mysqli `prepare()`, or PDO with emulation off) | new connection per request | server-side prepared, PREPAREd again in every request | `short` + naive prepared (needs `use_transaction:true`; short + prepared without a transaction doesn't work yet, see section 5) |
+| Python (Django) | default `CONN_MAX_AGE=0`, driver mysqlclient / PyMySQL | client builds the SQL, text protocol; disconnects after each request | `short`, text, DSN with `interpolateParams=true` |
+| Python (SQLAlchemy or anything with a pool) | driver mysqlclient / PyMySQL | client builds the SQL, text protocol | `long`, text, DSN with `interpolateParams=true` |
+| Node.js (mysql2) | `query()` | client-side escaping, text protocol | `long`, text, DSN with `interpolateParams=true` |
+| Node.js (mysql2) | `execute()` | server-side prepared, cached per connection | `long` + fixed prepared |
+| Ruby on Rails (mysql2 / trilogy adapter) | default | client-side escaping, text protocol | `long`, text, DSN with `interpolateParams=true` |
+| .NET (MySqlConnector) | default | client-side parameter substitution, text protocol | `long`, text, DSN with `interpolateParams=true` |
+| .NET (MySqlConnector) | calling `MySqlCommand.Prepare()` | server-side prepared | `long` + fixed prepared |
+| Rust (sqlx) | default | server-side prepared, cached per connection | `long` + fixed prepared |
+| sysbench | default (`--db-ps-mode=auto`) | server-side prepared, PREPAREd once per connection | `long` + fixed prepared (what the `sysbench-config-oltp-*.json` files use) |
+
+Multi-statement and pipelined binary aren't any framework's default; they are there to measure "how much faster would it be if the app merged a transaction into one or two round trips".
 
 ## 5. Combinations that don't work together
 
 Everything below was confirmed by actually running it against TiDB v8.5.
+
+### 5.1 Execution mode × connection type
+
+The switches aren't independent (multi-statement needs transactions and prepared statements; pipelined overrides the others), so the valid configurations are really these 8 execution modes times long / short connections:
+
+| Execution mode | Key settings | `long` | `short` |
+|---|---|---|---|
+| Text, no transaction | `use_transaction:false`, `use_prepared_statements:false` | ✅ | ✅ |
+| Text + transaction | `use_transaction:true`, `use_prepared_statements:false` | ✅ | ✅ |
+| Prepared, no transaction | `use_transaction:false`, `use_prepared_statements:true` | ✅ | ❌ fails from the 2nd session on |
+| Prepared (naive) + transaction | `use_transaction:true`, `use_prepared_statements:true` | ✅ | ✅ |
+| Prepared (fixed) + transaction | the above plus `fix_prepared_statement_reuse:true` | ✅ | ❌ fails from the 2nd session on |
+| Multi-statement (`prepared_cache`) | `use_transaction`, `use_prepared_statements`, `multi_statements` all `true` | ✅ | ✅ |
+| Multi-statement (`raw`) | the above plus `multi_statements_mode:"raw"` | ✅ | ✅ |
+| Pipelined binary | `pipelined_binary:true` | ✅ | ⚠️ `short` has no effect, still a long connection |
+
+Both text modes were tested with and without `interpolateParams=true` in the DSN, with the same result.
+
+### 5.2 Every error and ignored setting
 
 **Refused at startup:**
 
@@ -197,7 +248,7 @@ Everything below was confirmed by actually running it against TiDB v8.5.
 
 | Combination | What happens |
 |---|---|
-| `connection_type:"short"` + `fix_prepared_statement_reuse:true` | The first transaction succeeds, **every later one fails** with `sql: connection is already closed` (the cached statements are still bound to the old, closed connection). Don't use `fix_prepared_statement_reuse` with short connections. |
+| `connection_type:"short"` + server-side prepared without Go's `*sql.Tx`: i.e. `fix_prepared_statement_reuse:true`, or `use_prepared_statements:true` with `use_transaction:false` | The first session succeeds, **every later one fails** with `sql: connection is already closed` (the cached statements are still bound to the old, closed connection). For prepared statements over short connections, use "naive + transaction" or multi-statement. |
 | A `?` in an identifier position (e.g. a table name) whose param lacks `"literal": true`, on a server-side-prepare path (`use_prepared_statements`, `multi_statements`, `pipelined_binary`, or text mode without `interpolateParams=true`) | `Error 1064 … syntax error`, because MySQL can't bind a table name. See [7.6](#76-literal-put-the-value-straight-into-the-sql-text). |
 | `type:"ref"` pointing at a variable that hasn't been generated yet | `session variable "xxx" referenced before it was saved`; every session fails. |
 
@@ -208,7 +259,7 @@ Everything below was confirmed by actually running it against TiDB v8.5.
 | `pipelined_binary:true` | `use_transaction`, `use_prepared_statements`, `multi_statements`, `multi_statements_mode`, `fix_prepared_statement_reuse`, `connection_type` (always long) |
 | `multi_statements_mode` with `multi_statements:false` | `multi_statements_mode` |
 
-**Safe to combine**: short + text, short + naive prepared, short + multi-statement (either mode).
+For what works with short connections, see the table in 5.1.
 
 ## 6. SQL templates
 

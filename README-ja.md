@@ -8,7 +8,7 @@ SQL のテンプレートと「パラメータをどうランダムにするか�
 再現できること：
 
 - **接続のしかた**：長い接続（コネクションプールを持つアプリ）か、トランザクションごとに新しい接続（プールを持たないアプリ）か。
-- **SQL の送り方**：普通のテキストクエリ、サーバー側プリペアドステートメント、トランザクション全体を 1 往復で送る方式（multi-statement / pipelined binary）。
+- **SQL の送り方**：普通のテキストクエリ、サーバー側プリペアドステートメント、トランザクション全体を 1〜2 往復で送る方式（multi-statement / pipelined binary）。
 - **パラメータの分布**：一様、べき乗則（ホットスポット）、分割べき乗則。さらに「1 つのトランザクション内の複数の SQL で同じランダム id を使う」「接続ごとに 1 つのテーブルだけを使う」といった関連づけ。
 
 **しない**こと：
@@ -108,7 +108,7 @@ sysbench oltp_read_write \
 | `fix_prepared_statement_reuse` | bool | `false` | 「トランザクションのたびに PREPARE し直して CLOSE する」問題を直し、1 つの文を接続ごとに 1 回だけ PREPARE して、あとは EXECUTE をくり返すようにします。下で詳しく説明します。 |
 | `multi_statements` | bool | `false` | トランザクション全体を**1 つの**テキストプロトコルの要求にまとめて送ります（1 往復）。下で詳しく説明します。 |
 | `multi_statements_mode` | string | `"prepared_cache"` | `multi_statements: true` のときだけ意味があります。`"prepared_cache"` か `"raw"`。 |
-| `pipelined_binary` | bool | `false` | トランザクション内の EXECUTE パケットをバイナリプロトコルで続けて書き出し、まとめて応答を読みます（1 往復）。下で詳しく説明します。 |
+| `pipelined_binary` | bool | `false` | BEGIN とトランザクション内の EXECUTE パケットをバイナリプロトコルで続けて書き出し、応答を読んだあと COMMIT を送ります（2 往復）。下で詳しく説明します。 |
 | `templates` | array | （必須） | SQL テンプレートの一覧。[6 章](#6-sql-テンプレートtemplates)を参照。 |
 
 JSON の知らないキーは無視されるので、`"comment"` を自由に書いてコメントにできます（参考設定でもそうしています）。
@@ -157,8 +157,9 @@ JSON の知らないキーは無視されるので、`"comment"` を自由に書
 ### `pipelined_binary`
 
 **multi-statement のバイナリプロトコル版**です。[`github.com/dulao5/tidb-binary-multistmt`](https://github.com/dulao5/tidb-binary-multistmt) で実装しています。
-BEGIN を送ったあと、トランザクション内の `COM_STMT_EXECUTE` パケットを一気に続けて書き出し、すべての応答を順に読み、その結果で COMMIT か ROLLBACK を決めます。
-1 往復で、`SET @…` のテキストのオーバーヘッドがなく、文の PREPARE も接続ごとに 1 回だけです。
+BEGIN とトランザクション内の `COM_STMT_EXECUTE` パケットを 1 つのまとまりとして一気に続けて書き出し、すべての応答を順に読みます。すべて成功なら COMMIT を、失敗があれば ROLLBACK を送ります。
+つまり 1 トランザクションは **2 往復**（BEGIN ＋ EXECUTE のまとまりで 1 回、COMMIT / ROLLBACK で 1 回）で、`SET @…` のテキストのオーバーヘッドはありません。
+文の PREPARE は接続ごとに 1 回だけです（初めて出てきたときに、まとまりを書き出す前に PREPARE します）。
 
 - 悲観的トランザクションだけに対応します。途中の文が失敗しても、すでに書き出した後続の文は実行されます。最後の ROLLBACK で全体を取り消します。
 - 有効にすると、**`use_transaction` / `use_prepared_statements` / `multi_statements` / `fix_prepared_statement_reuse` / `connection_type` は効かなくなります**。
@@ -172,17 +173,67 @@ BEGIN を送ったあと、トランザクション内の `COM_STMT_EXECUTE` パ
 |---|---|---|---|
 | テキスト、トランザクションなし | `use_transaction:false`、`use_prepared_statements:false`、DSN に `interpolateParams=true` | N | 0 |
 | テキスト ＋ トランザクション | `use_transaction:true`、`use_prepared_statements:false`、DSN に `interpolateParams=true` | N + 2 | 0 |
+| テキスト、DSN に `interpolateParams=true` が**ない**（Go の既定） | `use_prepared_statements:false` | 2N（トランザクションありならさらに +2）：引数のある文ごとに、ドライバが自動で PREPARE ＋ EXECUTE し、そのあと CLOSE | N |
 | プリペアド（素朴版） | `use_transaction:true`、`use_prepared_statements:true` | 2N + 2（文ごとに PREPARE ＋ EXECUTE、コミット時に CLOSE） | N |
 | **プリペアド（修正版、基準）** | 上に `fix_prepared_statement_reuse:true` を足す | N + 2 | 初回だけ |
 | multi-statement | `use_transaction:true`、`use_prepared_statements:true`、`multi_statements:true` | 1 | 初回だけ（テキストの `PREPARE`） |
 | multi-statement raw | 上に `multi_statements_mode:"raw"` を足す | 1 | 0 |
-| pipelined binary | `pipelined_binary:true` | 1（BEGIN は別に 1 回） | 初回だけ |
+| pipelined binary | `pipelined_binary:true` | 2（BEGIN ＋ すべての EXECUTE を 1 まとまりで書き出し、そのあと COMMIT か ROLLBACK） | 初回だけ |
 
 「初回だけ」は長い接続の場合です。短い接続では session ごとに接続が新しくなるので、毎回 PREPARE し直します。
+
+### 4.1 よく使われる言語 / フレームワークに対応する設定
+
+下の表は、各ドライバの**既定の動き**に合わせて対応づけています。実際の動きはドライバの設定やコードの書き方で変わるので、「条件」の列をアプリと照らし合わせてください。
+`use_transaction` はアプリのコードで決めてください。明示的にトランザクションを開くなら `true`、autocommit で 1 文ずつ実行するなら `false` です。
+表の「修正版プリペアド」はトランザクションありの場合です。トランザクションを使わないアプリなら、`use_prepared_statements:true` ＋ `use_transaction:false` にしてください（長い接続なら、こちらも接続ごとに 1 回だけ PREPARE します）。
+
+| 言語 / フレームワーク | 条件 | ドライバが実際にすること | このツールの設定 |
+|---|---|---|---|
+| Go（`database/sql` ＋ go-sql-driver/mysql） | 既定：`db.Query(sql, args...)`、DSN に `interpolateParams` なし | 引数のある文ごとに PREPARE → EXECUTE → CLOSE | `long`、`use_prepared_statements:false`、DSN に `interpolateParams=true` を**付けない** |
+| Go | DSN に `interpolateParams=true` | クライアントで SQL を組み立て、テキストプロトコル | `long`、`use_prepared_statements:false`、DSN に `interpolateParams=true` |
+| Go | `*sql.Conn` で `PrepareContext` し、トランザクション内で `tx.StmtContext(stmt)` | トランザクションのたびに PREPARE し直し、コミット時に CLOSE | `long`、`use_transaction:true`、`use_prepared_statements:true`（素朴版） |
+| Go | `db.Prepare`（`*sql.DB` で）し、トランザクション内で `tx.Stmt(stmt)` | 接続ごとに 1 回 PREPARE して使い回す | おおよそ `long` ＋ 修正版プリペアド |
+| Go（GORM） | `PrepareStmt: true` | 接続ごとにプリペアドステートメントをキャッシュ | おおよそ `long` ＋ 修正版プリペアド |
+| Java（JDBC、MySQL Connector/J） | 既定（`useServerPrepStmts=false`） | クライアントで SQL を組み立て、テキストプロトコル | `long`、テキスト、DSN に `interpolateParams=true` |
+| Java（JDBC） | `useServerPrepStmts=true&cachePrepStmts=true` | サーバー側プリペアド、接続ごとにキャッシュ | `long` ＋ 修正版プリペアド |
+| Java（JDBC） | `useServerPrepStmts=true` で `cachePrepStmts` なし | `prepareStatement` のたびに PREPARE、`close()` で CLOSE | `long` ＋ 素朴版プリペアド |
+| PHP（PDO） | 既定（`PDO::ATTR_EMULATE_PREPARES=true`） | クライアント側で prepare を模倣し、テキストプロトコル。リクエストごとに新しい接続 | `short`、テキスト、DSN に `interpolateParams=true` |
+| PHP（mysqli の `prepare()`、または模倣を切った PDO） | リクエストごとに新しい接続 | サーバー側プリペアド。リクエストのたびに PREPARE し直す | `short` ＋ 素朴版プリペアド（`use_transaction:true` が必要。短い接続 ＋ プリペアド ＋ トランザクションなしは今は動きません。5 章を参照） |
+| Python（Django） | 既定の `CONN_MAX_AGE=0`、ドライバは mysqlclient / PyMySQL | クライアントで SQL を組み立て、テキストプロトコル。リクエストが終わるたびに切断 | `short`、テキスト、DSN に `interpolateParams=true` |
+| Python（SQLAlchemy など接続プールを持つもの） | ドライバは mysqlclient / PyMySQL | クライアントで SQL を組み立て、テキストプロトコル | `long`、テキスト、DSN に `interpolateParams=true` |
+| Node.js（mysql2） | `query()` | クライアント側でエスケープ、テキストプロトコル | `long`、テキスト、DSN に `interpolateParams=true` |
+| Node.js（mysql2） | `execute()` | サーバー側プリペアド、接続ごとにキャッシュ | `long` ＋ 修正版プリペアド |
+| Ruby on Rails（mysql2 / trilogy アダプタ） | 既定 | クライアント側でエスケープ、テキストプロトコル | `long`、テキスト、DSN に `interpolateParams=true` |
+| .NET（MySqlConnector） | 既定 | クライアント側でパラメータを置き換え、テキストプロトコル | `long`、テキスト、DSN に `interpolateParams=true` |
+| .NET（MySqlConnector） | `MySqlCommand.Prepare()` を呼ぶ | サーバー側プリペアド | `long` ＋ 修正版プリペアド |
+| Rust（sqlx） | 既定 | サーバー側プリペアド、接続ごとにキャッシュ | `long` ＋ 修正版プリペアド |
+| sysbench | 既定（`--db-ps-mode=auto`） | サーバー側プリペアド、接続ごとに 1 回 PREPARE | `long` ＋ 修正版プリペアド（`sysbench-config-oltp-*.json` はこれを使っています） |
+
+multi-statement と pipelined binary は、どのフレームワークの既定の動きにも当たりません。「アプリが 1 トランザクションを 1〜2 往復にまとめたら、どれだけ速くなるか」を測るためのものです。
 
 ## 5. 一緒に使えない組み合わせ
 
 以下はすべて TiDB v8.5 で実際に動かして確かめました。
+
+### 5.1 実行方式 × 接続方式
+
+これらのスイッチは互いに独立ではありません（multi-statement はトランザクションとプリペアドが前提、pipelined は他のスイッチを上書き）。そのため、有効な設定は実質的に次の 8 つの実行方式と、長い / 短い 2 つの接続方式の組み合わせだけです：
+
+| 実行方式 | 主な設定 | `long` | `short` |
+|---|---|---|---|
+| テキスト、トランザクションなし | `use_transaction:false`、`use_prepared_statements:false` | ✅ | ✅ |
+| テキスト ＋ トランザクション | `use_transaction:true`、`use_prepared_statements:false` | ✅ | ✅ |
+| プリペアド、トランザクションなし | `use_transaction:false`、`use_prepared_statements:true` | ✅ | ❌ 2 回目以降は毎回失敗 |
+| プリペアド（素朴版）＋ トランザクション | `use_transaction:true`、`use_prepared_statements:true` | ✅ | ✅ |
+| プリペアド（修正版）＋ トランザクション | 上に `fix_prepared_statement_reuse:true` を足す | ✅ | ❌ 2 回目以降は毎回失敗 |
+| multi-statement（`prepared_cache`） | `use_transaction`、`use_prepared_statements`、`multi_statements` がすべて `true` | ✅ | ✅ |
+| multi-statement（`raw`） | 上に `multi_statements_mode:"raw"` を足す | ✅ | ✅ |
+| pipelined binary | `pipelined_binary:true` | ✅ | ⚠️ `short` は効かず、長い接続のまま |
+
+テキストの 2 方式は、DSN に `interpolateParams=true` がある場合とない場合の両方を試し、同じ結果でした。
+
+### 5.2 エラーになる場合と、無視される設定
 
 **起動時にエラーで止まる：**
 
@@ -197,7 +248,7 @@ BEGIN を送ったあと、トランザクション内の `COM_STMT_EXECUTE` パ
 
 | 組み合わせ | 起きること |
 |---|---|
-| `connection_type:"short"` ＋ `fix_prepared_statement_reuse:true` | 最初のトランザクションは成功しますが、**以後はすべて失敗します**：`sql: connection is already closed`（キャッシュした文が、閉じた古い接続に結びついたままのため）。短い接続では `fix_prepared_statement_reuse` を使わないでください。 |
+| `connection_type:"short"` ＋ Go の `*sql.Tx` を通らないサーバー側プリペアド：つまり `fix_prepared_statement_reuse:true`、または `use_prepared_statements:true` で `use_transaction:false` | 最初の session は成功しますが、**以後はすべて失敗します**：`sql: connection is already closed`（キャッシュした文が、閉じた古い接続に結びついたままのため）。短い接続でプリペアドを使うなら、「素朴版 ＋ トランザクション」か multi-statement にしてください。 |
 | テーブル名などの識別子の位置に `?` を使い、そのパラメータに `"literal": true` がなく、サーバー側 prepare の経路（`use_prepared_statements`、`multi_statements`、`pipelined_binary`、または DSN に `interpolateParams=true` がないテキストモード）を通る | `Error 1064 … syntax error`。MySQL はテーブル名をバインドできないためです。[7.6](#76-literal値をそのまま-sql-文に埋め込む) を参照。 |
 | `type:"ref"` が、まだ作られていない変数を参照している | `session variable "xxx" referenced before it was saved`。すべての session が失敗します。 |
 
@@ -208,7 +259,7 @@ BEGIN を送ったあと、トランザクション内の `COM_STMT_EXECUTE` パ
 | `pipelined_binary:true` | `use_transaction`、`use_prepared_statements`、`multi_statements`、`multi_statements_mode`、`fix_prepared_statement_reuse`、`connection_type`（常に長い接続） |
 | `multi_statements:false` で `multi_statements_mode` を指定 | `multi_statements_mode` |
 
-**安心して組み合わせられるもの**：短い接続 ＋ テキスト、短い接続 ＋ 素朴版プリペアド、短い接続 ＋ multi-statement（どちらのモードでも）。
+短い接続で何が使えるかは、5.1 の表を見てください。
 
 ## 6. SQL テンプレート（templates）
 
