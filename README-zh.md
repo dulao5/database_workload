@@ -91,6 +91,8 @@ sysbench oltp_read_write \
 为什么不直接用 `sysbench run`？因为 sysbench 只能长连接、只能用它自己的 prepared 方式发 SQL；
 而本工具可以换成短连接、文本协议、multi-statement、pipelined binary，或者换一种热点分布，用同一份数据做对比。
 
+不确定该怎么设置才能贴近生产负载？请看[从 TiDB Grafana 提取需要模拟的负载特征](docs/extract-workload-from-grafana-zh.md)：它把每个设置项对应到能告诉你该怎么设置的 Grafana 面板。
+
 ### 2.3 非 sysbench 负载：用 dbgen 造数据
 
 自己的表结构（非 sbtest）推荐用 [kennytm/dbgen](https://github.com/kennytm/dbgen) 造数据。
