@@ -139,6 +139,7 @@ JSON の知らないキーは無視されるので、`"comment"` を自由に書
   - Perl / Python の CGI スクリプト、cron のバッチ、シェルから `mysql` コマンドを呼ぶ処理。
   - 接続を使い回さない Serverless 関数（呼び出しのたびに接続する AWS Lambda など）。
   - この種の負荷では、トランザクションごとに TCP ハンドシェイクと MySQL の認証がかかり、接続の確立と破棄そのものが負荷になります。
+  - 実際の切断・再接続と同じく、session の始めにクライアント側の接続に結びついた状態はすべて消えます。プリペアドステートメントは PREPARE し直し、`scope: "connection"` の変数は作り直します（テーブルも選び直します）。
   - 短い接続は送信元ポートを早く使い切ります。高 QPS のときは [9 章](#9-os-チューニング短い接続で高-qps-のとき)を見てください。
 
 ### `use_prepared_statements` と `fix_prepared_statement_reuse`
@@ -210,7 +211,7 @@ BEGIN とトランザクション内の `COM_STMT_EXECUTE` パケットを 1 つ
 | Java（JDBC） | `useServerPrepStmts=true&cachePrepStmts=true` | サーバー側プリペアド、接続ごとにキャッシュ | `long` ＋ 修正版プリペアド |
 | Java（JDBC） | `useServerPrepStmts=true` で `cachePrepStmts` なし | `prepareStatement` のたびに PREPARE、`close()` で CLOSE | `long` ＋ 素朴版プリペアド |
 | PHP（PDO） | 既定（`PDO::ATTR_EMULATE_PREPARES=true`） | クライアント側で prepare を模倣し、テキストプロトコル。リクエストごとに新しい接続 | `short`、テキスト、DSN に `interpolateParams=true` |
-| PHP（mysqli の `prepare()`、または模倣を切った PDO） | リクエストごとに新しい接続 | サーバー側プリペアド。リクエストのたびに PREPARE し直す | `short` ＋ 素朴版プリペアド（`use_transaction:true` が必要。短い接続 ＋ プリペアド ＋ トランザクションなしは今は動きません。5 章を参照） |
+| PHP（mysqli の `prepare()`、または模倣を切った PDO） | リクエストごとに新しい接続 | サーバー側プリペアド。リクエストのたびに PREPARE し直す | `short`、`use_prepared_statements:true` |
 | Python（Django） | 既定の `CONN_MAX_AGE=0`、ドライバは mysqlclient / PyMySQL | クライアントで SQL を組み立て、テキストプロトコル。リクエストが終わるたびに切断 | `short`、テキスト、DSN に `interpolateParams=true` |
 | Python（SQLAlchemy など接続プールを持つもの） | ドライバは mysqlclient / PyMySQL | クライアントで SQL を組み立て、テキストプロトコル | `long`、テキスト、DSN に `interpolateParams=true` |
 | Node.js（mysql2） | `query()` | クライアント側でエスケープ、テキストプロトコル | `long`、テキスト、DSN に `interpolateParams=true` |
@@ -235,9 +236,9 @@ multi-statement と pipelined binary は、どのフレームワークの既定�
 |---|---|---|---|
 | テキスト、トランザクションなし | `use_transaction:false`、`use_prepared_statements:false` | ✅ | ✅ |
 | テキスト ＋ トランザクション | `use_transaction:true`、`use_prepared_statements:false` | ✅ | ✅ |
-| プリペアド、トランザクションなし | `use_transaction:false`、`use_prepared_statements:true` | ✅ | ❌ 2 回目以降は毎回失敗 |
+| プリペアド、トランザクションなし | `use_transaction:false`、`use_prepared_statements:true` | ✅ | ✅ |
 | プリペアド（素朴版）＋ トランザクション | `use_transaction:true`、`use_prepared_statements:true` | ✅ | ✅ |
-| プリペアド（修正版）＋ トランザクション | 上に `fix_prepared_statement_reuse:true` を足す | ✅ | ❌ 2 回目以降は毎回失敗 |
+| プリペアド（修正版）＋ トランザクション | 上に `fix_prepared_statement_reuse:true` を足す | ✅ | ✅ |
 | multi-statement（`prepared_cache`） | `use_transaction`、`use_prepared_statements`、`multi_statements` がすべて `true` | ✅ | ✅ |
 | multi-statement（`raw`） | 上に `multi_statements_mode:"raw"` を足す | ✅ | ✅ |
 | pipelined binary | `pipelined_binary:true` | ✅ | ⚠️ `short` は効かず、長い接続のまま |
@@ -259,7 +260,6 @@ multi-statement と pipelined binary は、どのフレームワークの既定�
 
 | 組み合わせ | 起きること |
 |---|---|
-| `connection_type:"short"` ＋ Go の `*sql.Tx` を通らないサーバー側プリペアド：つまり `fix_prepared_statement_reuse:true`、または `use_prepared_statements:true` で `use_transaction:false` | 最初の session は成功しますが、**以後はすべて失敗します**：`sql: connection is already closed`（キャッシュした文が、閉じた古い接続に結びついたままのため）。短い接続でプリペアドを使うなら、「素朴版 ＋ トランザクション」か multi-statement にしてください。 |
 | テーブル名などの識別子の位置に `?` を使い、そのパラメータに `"literal": true` がなく、サーバー側 prepare の経路（`use_prepared_statements`、`multi_statements`、`pipelined_binary`、または DSN に `interpolateParams=true` がないテキストモード）を通る | `Error 1064 … syntax error`。MySQL はテーブル名をバインドできないためです。[7.6](#76-literal値をそのまま-sql-文に埋め込む) を参照。 |
 | `type:"ref"` が、まだ作られていない変数を参照している | `session variable "xxx" referenced before it was saved`。すべての session が失敗します。 |
 
@@ -301,7 +301,7 @@ multi-statement と pipelined binary は、どのフレームワークの既定�
   例：ランダムな id を DELETE し、同じ id で INSERT し直す。
 - **`save_as` ＋ `scope: "connection"`**：**worker ごとに 1 回だけ**作り、以後ずっとその値を使います。
   例：sysbench と同じように、接続の最初にテーブルを 1 つ選び、以後のトランザクションはすべてそのテーブルだけを使う。
-  注意：結びつく先は worker で、物理接続ではありません。短い接続で接続が変わっても値は変わりません。
+  `connection_type: "short"` では session ごとに新しい接続になるので、session ごとに作り直されます。
 - **`type: "ref"`**：何も作らず、参照するだけです。まず session の変数を、次に connection の変数を探します。参照する変数は**それより前**（前のテンプレート、または同じテンプレートの前のパラメータ）で作られている必要があります。
 
 ### 7.2 数値（`type: "number"`）
@@ -454,8 +454,8 @@ id はすべて `uniform`（一様分布）です（sysbench の既定 `--rand-t
 | `sysbench-config-oltp-read-write-multi.json` | multi-statement（`prepared_cache`） | `multi_statements: true` |
 | `sysbench-config-oltp-read-write-pipelined.json` | pipelined binary | `pipelined_binary: true` |
 
-短い接続（PHP の再現）を試すときは、`oltp-read-write.json` か `-multi.json` の `connection_type` を `"short"` にしてください。
-`-fixprepared.json` では**しないでください**（5 章を参照）。`-pipelined.json` では変えても効きません。
+短い接続（PHP の再現）を試すときは、どのファイルでも `connection_type` を `"short"` にすれば試せます（`-pipelined.json` だけは変えても効きません）。
+短い接続では session ごとにテーブルを選び直すことに注意してください。
 
 ### 8.3 初期の小さな設定（動作確認用）
 

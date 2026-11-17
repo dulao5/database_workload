@@ -139,6 +139,7 @@ Unknown JSON keys are ignored, so you can add `"comment"` anywhere (the referenc
   - Perl / Python CGI scripts, cron batch jobs, shell scripts calling the `mysql` CLI;
   - Serverless functions that don't reuse connections (e.g. an AWS Lambda that connects on every invocation).
   - Every transaction pays for a TCP handshake plus MySQL authentication; connection setup/teardown is itself the load.
+  - Just like a real disconnect + connect, all client-side state tied to the connection is cleared at the start of every session: prepared statements are PREPAREd again and `scope: "connection"` variables are regenerated (e.g. a new table is picked).
   - Short connections burn through client ports fast; see [section 9](#9-os-tuning-high-qps-with-short-connections) for high QPS.
 
 ### `use_prepared_statements` and `fix_prepared_statement_reuse`
@@ -210,7 +211,7 @@ Set `use_transaction` according to the app code: `true` if it opens transactions
 | Java (JDBC) | `useServerPrepStmts=true&cachePrepStmts=true` | server-side prepared, cached per connection | `long` + fixed prepared |
 | Java (JDBC) | `useServerPrepStmts=true` without `cachePrepStmts` | PREPARE on every `prepareStatement`, CLOSE on `close()` | `long` + naive prepared |
 | PHP (PDO) | default (`PDO::ATTR_EMULATE_PREPARES=true`) | client-side emulated prepare, text protocol; new connection per request | `short`, text, DSN with `interpolateParams=true` |
-| PHP (mysqli `prepare()`, or PDO with emulation off) | new connection per request | server-side prepared, PREPAREd again in every request | `short` + naive prepared (needs `use_transaction:true`; short + prepared without a transaction doesn't work yet, see section 5) |
+| PHP (mysqli `prepare()`, or PDO with emulation off) | new connection per request | server-side prepared, PREPAREd again in every request | `short`, `use_prepared_statements:true` |
 | Python (Django) | default `CONN_MAX_AGE=0`, driver mysqlclient / PyMySQL | client builds the SQL, text protocol; disconnects after each request | `short`, text, DSN with `interpolateParams=true` |
 | Python (SQLAlchemy or anything with a pool) | driver mysqlclient / PyMySQL | client builds the SQL, text protocol | `long`, text, DSN with `interpolateParams=true` |
 | Node.js (mysql2) | `query()` | client-side escaping, text protocol | `long`, text, DSN with `interpolateParams=true` |
@@ -235,9 +236,9 @@ The switches aren't independent (multi-statement needs transactions and prepared
 |---|---|---|---|
 | Text, no transaction | `use_transaction:false`, `use_prepared_statements:false` | ✅ | ✅ |
 | Text + transaction | `use_transaction:true`, `use_prepared_statements:false` | ✅ | ✅ |
-| Prepared, no transaction | `use_transaction:false`, `use_prepared_statements:true` | ✅ | ❌ fails from the 2nd session on |
+| Prepared, no transaction | `use_transaction:false`, `use_prepared_statements:true` | ✅ | ✅ |
 | Prepared (naive) + transaction | `use_transaction:true`, `use_prepared_statements:true` | ✅ | ✅ |
-| Prepared (fixed) + transaction | the above plus `fix_prepared_statement_reuse:true` | ✅ | ❌ fails from the 2nd session on |
+| Prepared (fixed) + transaction | the above plus `fix_prepared_statement_reuse:true` | ✅ | ✅ |
 | Multi-statement (`prepared_cache`) | `use_transaction`, `use_prepared_statements`, `multi_statements` all `true` | ✅ | ✅ |
 | Multi-statement (`raw`) | the above plus `multi_statements_mode:"raw"` | ✅ | ✅ |
 | Pipelined binary | `pipelined_binary:true` | ✅ | ⚠️ `short` has no effect, still a long connection |
@@ -259,7 +260,6 @@ Both text modes were tested with and without `interpolateParams=true` in the DSN
 
 | Combination | What happens |
 |---|---|
-| `connection_type:"short"` + server-side prepared without Go's `*sql.Tx`: i.e. `fix_prepared_statement_reuse:true`, or `use_prepared_statements:true` with `use_transaction:false` | The first session succeeds, **every later one fails** with `sql: connection is already closed` (the cached statements are still bound to the old, closed connection). For prepared statements over short connections, use "naive + transaction" or multi-statement. |
 | A `?` in an identifier position (e.g. a table name) whose param lacks `"literal": true`, on a server-side-prepare path (`use_prepared_statements`, `multi_statements`, `pipelined_binary`, or text mode without `interpolateParams=true`) | `Error 1064 … syntax error`, because MySQL can't bind a table name. See [7.6](#76-literal-put-the-value-straight-into-the-sql-text). |
 | `type:"ref"` pointing at a variable that hasn't been generated yet | `session variable "xxx" referenced before it was saved`; every session fails. |
 
@@ -301,7 +301,7 @@ For what works with short connections, see the table in 5.1.
   Example: DELETE a random id, then INSERT it back with the same id.
 - **`save_as` + `scope: "connection"`**: generated **once per worker** and reused from then on.
   Example: like sysbench, each connection picks one random table at start and every transaction hits only that table.
-  Note: it is tied to the worker, not the physical connection; with short connections the value stays the same across reconnects.
+  With `connection_type: "short"` every session is a new connection, so the value is generated again for every session.
 - **`type: "ref"`**: generates nothing, only looks a value up — first in the session's variables, then in the connection-scope ones. The variable must have been generated **earlier** (an earlier template, or an earlier param of the same template).
 
 ### 7.2 Numbers (`type: "number"`)
@@ -454,8 +454,8 @@ All ids are `uniform` (unlike sysbench's default `--rand-type=special`). For hot
 | `sysbench-config-oltp-read-write-multi.json` | multi-statement (`prepared_cache`) | `multi_statements: true` |
 | `sysbench-config-oltp-read-write-pipelined.json` | pipelined binary | `pipelined_binary: true` |
 
-To test short connections (simulating PHP), set `connection_type` to `"short"` in `oltp-read-write.json` or `-multi.json`.
-**Don't** do it in `-fixprepared.json` (see section 5); in `-pipelined.json` it has no effect.
+To test short connections (simulating PHP), set `connection_type` to `"short"` in any of these files (except `-pipelined.json`, where it has no effect).
+Note that with short connections a new table is picked every session.
 
 ### 8.3 Early, small configs (for smoke tests)
 

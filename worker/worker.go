@@ -63,9 +63,11 @@ type Worker struct {
 	longConn *sql.Conn
 
 	// connVars holds "connection"-scoped session variables: generated once
-	// (the first time their defining param runs) and reused for the rest of
-	// this worker's lifetime, e.g. picking one random table per connection
-	// the way sysbench's oltp-read-write does.
+	// (the first time their defining param runs) and reused for as long as
+	// this worker's connection lives, e.g. picking one random table per
+	// connection the way sysbench's oltp-read-write does. With
+	// connection_type "short" that is one session (see
+	// resetConnectionScopedState).
 	connVars map[string]interface{}
 
 	// stmtCache holds prepared statements keyed by their fully-rendered SQL
@@ -316,6 +318,10 @@ func (w *Worker) runSession(ctx context.Context) {
 		w.runSessionPipelinedBinary(ctx)
 		return
 	}
+	if w.isShortConn {
+		// Every session below gets a brand-new physical connection.
+		w.resetConnectionScopedState()
+	}
 	if w.multiStatements {
 		if w.multiStatementsRaw {
 			w.runSessionMultiStatementRaw(ctx)
@@ -463,6 +469,29 @@ func (w *Worker) runSession(ctx context.Context) {
 			sessionFailed = true
 		}
 	}
+}
+
+// resetConnectionScopedState drops every piece of client-side state that
+// belongs to one physical connection, so a connection_type "short" session
+// behaves like a real disconnect + connect (e.g. a PHP request): nothing
+// prepared on, or decided for, the previous connection carries over.
+//
+//   - stmtCache: its *sql.Stmt values are bound to the *sql.Conn they were
+//     prepared on. That conn was closed at the end of the previous session,
+//     so reusing them fails with "sql: connection is already closed"
+//     (the fix_prepared_statement_reuse path and the no-transaction
+//     use_prepared_statements path call them directly). The server already
+//     dropped them on disconnect, so they're simply forgotten, not closed.
+//   - connVars: "connection"-scoped session variables (e.g. sysbench's
+//     one-table-per-connection pick) are re-generated for the new
+//     connection.
+//   - preparedCache: multi_statements' per-connection PREPARE bookkeeping.
+//     It is keyed by physical connection and so already correct, but every
+//     closed connection would otherwise linger in it (up to its LRU cap).
+func (w *Worker) resetConnectionScopedState() {
+	w.stmtCache = make(map[string]*sql.Stmt)
+	w.connVars = make(map[string]interface{})
+	w.preparedCache = multistmt.NewPreparedCache(0, 0)
 }
 
 // acquireConn returns the *sql.Conn to use for this session, and whether

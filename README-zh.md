@@ -139,6 +139,7 @@ JSON 里不认识的字段会被忽略，所以可以随意写 `"comment"` 做�
   - Perl / Python 的 CGI 脚本、cron 批处理、shell 里调用 `mysql` 命令行；
   - 不复用连接的 Serverless 函数（如每次调用都建连的 AWS Lambda）。
   - 这种负载的特点是：每个事务都要付出 TCP 握手 + MySQL 认证的代价，连接建立/销毁本身就是压力来源。
+  - 和真实的断开重连一样，每个 session 开始时，客户端所有绑在连接上的状态都会清空：prepared statement 要重新 PREPARE，`scope: "connection"` 的变量要重新生成（比如重新选表）。
   - 短连接下源端口用得很快，高 QPS 时请看[第 9 节](#9-os-调优短连接高-qps-时)。
 
 ### `use_prepared_statements` 与 `fix_prepared_statement_reuse`
@@ -210,7 +211,7 @@ JSON 里不认识的字段会被忽略，所以可以随意写 `"comment"` 做�
 | Java（JDBC） | `useServerPrepStmts=true&cachePrepStmts=true` | 服务端 prepared，每个连接缓存 | `long` + 修正版 prepared |
 | Java（JDBC） | `useServerPrepStmts=true`，不开 `cachePrepStmts` | 每次 `prepareStatement` 都 PREPARE，`close()` 时 CLOSE | `long` + 朴素版 prepared |
 | PHP（PDO） | 默认（`PDO::ATTR_EMULATE_PREPARES=true`） | 客户端模拟 prepare，文本协议；每个请求新建连接 | `short`，文本，DSN 加 `interpolateParams=true` |
-| PHP（mysqli `prepare()`，或 PDO 关闭模拟） | 每个请求新建连接 | 服务端 prepared，每个请求都重新 PREPARE | `short` + 朴素版 prepared（需 `use_transaction:true`；短连接 + prepared + 不开事务目前跑不了，见第 5 节） |
+| PHP（mysqli `prepare()`，或 PDO 关闭模拟） | 每个请求新建连接 | 服务端 prepared，每个请求都重新 PREPARE | `short`，`use_prepared_statements:true` |
 | Python（Django） | 默认 `CONN_MAX_AGE=0`，驱动 mysqlclient / PyMySQL | 客户端拼 SQL，文本协议；每个请求结束就断开 | `short`，文本，DSN 加 `interpolateParams=true` |
 | Python（SQLAlchemy 等带连接池的） | 驱动 mysqlclient / PyMySQL | 客户端拼 SQL，文本协议 | `long`，文本，DSN 加 `interpolateParams=true` |
 | Node.js（mysql2） | `query()` | 客户端转义，文本协议 | `long`，文本，DSN 加 `interpolateParams=true` |
@@ -235,9 +236,9 @@ multi-statement 和 pipelined binary 不对应某个现成框架的默认行为�
 |---|---|---|---|
 | 文本，无事务 | `use_transaction:false`，`use_prepared_statements:false` | ✅ | ✅ |
 | 文本 + 事务 | `use_transaction:true`，`use_prepared_statements:false` | ✅ | ✅ |
-| prepared，无事务 | `use_transaction:false`，`use_prepared_statements:true` | ✅ | ❌ 第二次起每次失败 |
+| prepared，无事务 | `use_transaction:false`，`use_prepared_statements:true` | ✅ | ✅ |
 | prepared（朴素版）+ 事务 | `use_transaction:true`，`use_prepared_statements:true` | ✅ | ✅ |
-| prepared（修正版）+ 事务 | 上面再加 `fix_prepared_statement_reuse:true` | ✅ | ❌ 第二次起每次失败 |
+| prepared（修正版）+ 事务 | 上面再加 `fix_prepared_statement_reuse:true` | ✅ | ✅ |
 | multi-statement（`prepared_cache`） | `use_transaction`、`use_prepared_statements`、`multi_statements` 都为 `true` | ✅ | ✅ |
 | multi-statement（`raw`） | 上面再加 `multi_statements_mode:"raw"` | ✅ | ✅ |
 | pipelined binary | `pipelined_binary:true` | ✅ | ⚠️ `short` 不生效，仍是长连接 |
@@ -259,7 +260,6 @@ multi-statement 和 pipelined binary 不对应某个现成框架的默认行为�
 
 | 组合 | 现象 |
 |---|---|
-| `connection_type:"short"` + 服务端 prepared，且不经过 Go 的 `*sql.Tx`：即 `fix_prepared_statement_reuse:true`，或 `use_prepared_statements:true` 但 `use_transaction:false` | 第一个 session 成功，**之后每个都失败**：`sql: connection is already closed`（缓存的语句还绑在已关闭的旧连接上）。短连接下要用 prepared，请用"朴素版 + 事务"或 multi-statement。 |
 | 表名等标识符位置用了 `?`，但参数没有 `"literal": true`，且走的是服务端 prepare（`use_prepared_statements`、`multi_statements`、`pipelined_binary`，或文本模式但 DSN 没有 `interpolateParams=true`） | `Error 1064 … syntax error`，因为 MySQL 不能把表名作为绑定参数。见 [7.6 节](#76-literal把值直接拼进-sql-文本)。 |
 | `type:"ref"` 引用了一个还没生成过的变量 | `session variable "xxx" referenced before it was saved`，每个 session 都失败。 |
 
@@ -301,7 +301,7 @@ multi-statement 和 pipelined binary 不对应某个现成框架的默认行为�
   例：DELETE 一个随机 id，再用同一个 id INSERT 回去。
 - **`save_as` + `scope: "connection"`**：**每个 worker 只生成一次**，之后一直用这个值。
   例：像 sysbench 一样，每个连接开局选一张随机表，之后所有事务都只打这张表。
-  注意：它绑定的是 worker，不是物理连接。短连接下换了新连接，值也不变。
+  `connection_type: "short"` 时每个 session 都是新连接，所以每个 session 都会重新生成一次。
 - **`type: "ref"`**：不生成，只引用。先查本 session 的变量，再查 connection 级的变量。被引用的变量必须在**更早的位置**（更前面的模板，或同一模板里更靠前的参数）生成过。
 
 ### 7.2 数字（`type: "number"`）
@@ -454,8 +454,8 @@ MySQL 的绑定参数只能出现在"值"的位置，**表名、列名不能是 
 | `sysbench-config-oltp-read-write-multi.json` | multi-statement（`prepared_cache`） | `multi_statements: true` |
 | `sysbench-config-oltp-read-write-pipelined.json` | pipelined binary | `pipelined_binary: true` |
 
-想测短连接（模拟 PHP），把 `oltp-read-write.json` 或 `-multi.json` 的 `connection_type` 改成 `"short"` 即可。
-**不要**改 `-fixprepared.json`（见第 5 节），改 `-pipelined.json` 也不会生效。
+想测短连接（模拟 PHP），把任意一个文件的 `connection_type` 改成 `"short"` 即可（`-pipelined.json` 除外，改了不生效）。
+注意短连接下每个 session 都会重新选表。
 
 ### 8.3 早期的小配置（冒烟测试用）
 
