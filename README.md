@@ -76,6 +76,8 @@ sysbench oltp_read_write \
 # 3) stop with Ctrl-C
 ```
 
+The reference configs' `db_conn_str` all point at a local playground, `root:@tcp(127.0.0.1:4000)/test` (root, empty password). **Replace it with your own address, user and password before use.**
+
 **Important: the number ranges in the JSON must match the `prepare` options.**
 
 | sysbench option | Where in the JSON | Value in the reference configs |
@@ -112,7 +114,7 @@ Just one: `-config <path>`, default `config.json`.
 |---|---|---|---|
 | `db_conn_str` | string | (required) | A [go-sql-driver/mysql DSN](https://github.com/go-sql-driver/mysql#dsn-data-source-name), e.g. `root:@tcp(127.0.0.1:4000)/test?parseTime=true&timeout=3s&readTimeout=3s&writeTimeout=3s`. Include timeouts so a network problem doesn't hang workers. |
 | `concurrency` | int | `0` | Number of workers. **Each worker uses exactly 1 connection**, so this is also the number of DB connections. |
-| `rate_per_thread` | int | `0` | Sessions per second per worker (transactions per second when `use_transaction` is on). `0` or omitted = no limit, the next session starts right away. If one session takes longer than `1/rate` seconds, the real rate falls below the setting (missed ticks are not made up). |
+| `rate_per_thread` | int | `0` | Sessions per second per worker (transactions per second when `use_transaction` is on). `0` or omitted = no limit, the next session starts right away. If one session takes longer than `1/rate` seconds, the next session starts right away (at most one tick is made up, since Go's ticker buffers only one), and the overall rate still falls below the setting. |
 | `connection_type` | string | `"long"` | `"long"`: long-lived connection; `"short"`: open and close a connection for every session. See below. |
 | `use_transaction` | bool | `false` | Wrap each session's statements in `BEGIN … COMMIT` (pessimistic by default on TiDB). |
 | `use_prepared_statements` | bool | `false` | `true`: server-side prepared statements (binary protocol, `COM_STMT_PREPARE` / `COM_STMT_EXECUTE`); `false`: text protocol (`COM_QUERY`). |
@@ -428,6 +430,7 @@ Integers only (fresh or from `ref`). Typical use: the upper bound of a range que
 ## 8. Reference configs: sysbench-style JSON files
 
 All of them expect data from `sysbench … --tables=100 --table-size=10000 prepare` (if you change the table count or size, change the JSON too — see 2.2).
+Their `db_conn_str` is the local `root:@tcp(127.0.0.1:4000)/test`; replace it with your own address, user and password.
 They default to `concurrency: 40`, `rate_per_thread: 1` (i.e. 40 transactions/s); raise these for real load.
 Unless noted, they use the baseline mode: long connection + transaction + fixed prepared.
 

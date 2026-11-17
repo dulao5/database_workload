@@ -76,6 +76,8 @@ sysbench oltp_read_write \
 # 3) Ctrl-C 停止
 ```
 
+参考配置里的 `db_conn_str` 都是本地 playground 的 `root:@tcp(127.0.0.1:4000)/test`（root、空密码），**用之前请换成你自己的地址、用户和密码**。
+
 **关键：JSON 里的数字范围要和 `prepare` 的参数对上。**
 
 | sysbench 参数 | 对应 JSON 位置 | 参考配置里的值 |
@@ -112,7 +114,7 @@ dbgen 里某列只有若干个枚举值，本工具里就用 `set` 从同样的�
 |---|---|---|---|
 | `db_conn_str` | string | （必填） | [go-sql-driver/mysql 的 DSN](https://github.com/go-sql-driver/mysql#dsn-data-source-name)，如 `root:@tcp(127.0.0.1:4000)/test?parseTime=true&timeout=3s&readTimeout=3s&writeTimeout=3s`。建议带上超时，避免网络故障时 worker 卡死。 |
 | `concurrency` | int | `0` | 并发 worker 数。**每个 worker 恰好占 1 条连接**，所以这也是到数据库的连接数。 |
-| `rate_per_thread` | int | `0` | 每个 worker 每秒执行几个 session（开事务时就是几个事务）。`0` 或不写 = 不限速，跑完一个立刻跑下一个。如果一个 session 本身耗时超过 `1/rate` 秒，实际速率会低于设定值（不会补发）。 |
+| `rate_per_thread` | int | `0` | 每个 worker 每秒执行几个 session（开事务时就是几个事务）。`0` 或不写 = 不限速，跑完一个立刻跑下一个。如果一个 session 本身耗时超过 `1/rate` 秒，下一个 session 会紧接着立刻开始（最多补一次，因为 Go 的 ticker 只缓存一个节拍），整体速率仍会低于设定值。 |
 | `connection_type` | string | `"long"` | `"long"`：长连接；`"short"`：每个 session 新建并关闭连接。详见下文。 |
 | `use_transaction` | bool | `false` | 是否把一个 session 里的所有 SQL 包在 `BEGIN … COMMIT` 里（TiDB 默认是悲观事务）。 |
 | `use_prepared_statements` | bool | `false` | `true`：走服务端 prepared statement（二进制协议 `COM_STMT_PREPARE` / `COM_STMT_EXECUTE`）；`false`：走文本协议 `COM_QUERY`。 |
@@ -428,6 +430,7 @@ MySQL 的绑定参数只能出现在"值"的位置，**表名、列名不能是 
 ## 8. 参考配置：各种 sysbench JSON
 
 全部对应 `sysbench … --tables=100 --table-size=10000 prepare` 准备的数据（改了表数/行数请同步改 JSON，见 2.2 节）。
+`db_conn_str` 都写的是本地的 `root:@tcp(127.0.0.1:4000)/test`，请换成你自己的地址、用户和密码。
 默认都是 `concurrency: 40`、`rate_per_thread: 1`（即 40 个事务/秒），压测时请按需调大。
 除特别说明外都用基线方式：长连接 + 事务 + 修正版 prepared。
 

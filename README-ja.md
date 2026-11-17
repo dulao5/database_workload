@@ -76,6 +76,8 @@ sysbench oltp_read_write \
 # 3) Ctrl-C で止める
 ```
 
+参考設定の `db_conn_str` は、どれもローカルの playground 向けの `root:@tcp(127.0.0.1:4000)/test`（root、パスワードなし）です。**使う前に、自分のアドレス・ユーザー・パスワードに書き換えてください。**
+
 **大事な点：JSON の数値の範囲を `prepare` の指定に合わせてください。**
 
 | sysbench の指定 | JSON の場所 | 参考設定の値 |
@@ -112,7 +114,7 @@ dbgen である列の値がいくつかの決まった値だけなら、この�
 |---|---|---|---|
 | `db_conn_str` | string | （必須） | [go-sql-driver/mysql の DSN](https://github.com/go-sql-driver/mysql#dsn-data-source-name)。例：`root:@tcp(127.0.0.1:4000)/test?parseTime=true&timeout=3s&readTimeout=3s&writeTimeout=3s`。ネットワーク障害で worker が止まらないよう、タイムアウトを付けることをおすすめします。 |
 | `concurrency` | int | `0` | worker の数。**1 つの worker がちょうど 1 本の接続を使う**ので、DB への接続数でもあります。 |
-| `rate_per_thread` | int | `0` | worker 1 つあたり毎秒何 session 実行するか（トランザクションありならトランザクション数）。`0` または省略で無制限（終わったらすぐ次へ）。1 session が `1/rate` 秒より長くかかると、実際のレートは設定より下がります（取りこぼした分を後で埋めることはしません）。 |
+| `rate_per_thread` | int | `0` | worker 1 つあたり毎秒何 session 実行するか（トランザクションありならトランザクション数）。`0` または省略で無制限（終わったらすぐ次へ）。1 session が `1/rate` 秒より長くかかると、次の session はすぐに始まります（Go の ticker は 1 拍しか溜めないので、取り戻すのは最大 1 回）。それでも全体のレートは設定より下がります。 |
 | `connection_type` | string | `"long"` | `"long"`：長い接続。`"short"`：session ごとに接続を開いて閉じる。下で詳しく説明します。 |
 | `use_transaction` | bool | `false` | session 内の SQL をすべて `BEGIN … COMMIT` で囲むか（TiDB の既定は悲観的トランザクション）。 |
 | `use_prepared_statements` | bool | `false` | `true`：サーバー側プリペアドステートメント（バイナリプロトコル、`COM_STMT_PREPARE` / `COM_STMT_EXECUTE`）。`false`：テキストプロトコル（`COM_QUERY`）。 |
@@ -428,6 +430,7 @@ MySQL のバインドパラメータは「値」の位置にしか置けませ�
 ## 8. 参考設定：sysbench 相当の JSON
 
 どれも `sysbench … --tables=100 --table-size=10000 prepare` で用意したデータを前提にしています（テーブル数や行数を変えたら JSON も合わせてください。2.2 を参照）。
+`db_conn_str` はローカルの `root:@tcp(127.0.0.1:4000)/test` なので、自分のアドレス・ユーザー・パスワードに書き換えてください。
 既定は `concurrency: 40`、`rate_per_thread: 1`（つまり毎秒 40 トランザクション）なので、負荷をかけるときは必要に応じて上げてください。
 特に断りがなければ、基準の方式（長い接続 ＋ トランザクション ＋ 修正版プリペアド）です。
 
