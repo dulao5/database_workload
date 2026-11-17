@@ -91,6 +91,8 @@ If the ranges are larger than the real data, nothing errors — SELECTs just ret
 Why not just `sysbench run`? sysbench only does long connections and only its own way of using prepared statements.
 This tool can switch to short connections, the text protocol, multi-statement, pipelined binary, or a different hotspot distribution, against the same data, so you can compare them.
 
+Not sure which settings match your production load? See [Extracting the workload features to simulate from TiDB Grafana](docs/extract-workload-from-grafana.md): it maps each setting to the Grafana panel that tells you what to set.
+
 ### 2.3 Non-sysbench loads: generate data with dbgen
 
 For your own schemas (not sbtest), [kennytm/dbgen](https://github.com/kennytm/dbgen) is the recommended data generator.

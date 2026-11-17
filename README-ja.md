@@ -91,6 +91,8 @@ sysbench oltp_read_write \
 なぜ `sysbench run` をそのまま使わないのか：sysbench は長い接続しか使えず、プリペアドステートメントの使い方も sysbench のやり方に固定です。
 このツールなら、同じデータに対して短い接続・テキストプロトコル・multi-statement・pipelined binary・別のホットスポット分布に切り替えて比べられます。
 
+本番の負荷に合わせる設定が分からない場合は、[TiDB Grafana から再現すべき負荷の特徴を取り出す](docs/extract-workload-from-grafana-ja.md)を参照してください。各設定について、どの Grafana パネルを見れば値を決められるかを説明しています。
+
 ### 2.3 sysbench 以外の負荷：dbgen でデータを作る
 
 自分のテーブル構造（sbtest 以外）なら、データ作りには [kennytm/dbgen](https://github.com/kennytm/dbgen) をおすすめします。
