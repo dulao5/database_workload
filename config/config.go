@@ -113,8 +113,11 @@ type Param struct {
 	// once it has been generated. Scope controls where it is stored:
 	//   - "transaction" (default when SaveAs is set): reset at the start of
 	//     every session/transaction (config.UseTransaction's unit of work).
-	//   - "connection": generated once per worker and kept for the whole
-	//     lifetime of that worker's underlying connection.
+	//   - "connection": generated once per worker connection and kept for
+	//     as long as that connection lives. With connection_type "long"
+	//     that is the worker's whole lifetime (barring reconnects after an
+	//     error); with "short" every session is a new connection, so the
+	//     value is generated again for every session.
 	//
 	// A param with Type "ref" doesn't generate anything; it looks up a
 	// value previously stored under RefName (transaction scope is checked

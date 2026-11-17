@@ -1,9 +1,13 @@
 package worker
 
 import (
+	"context"
+	"database/sql"
 	"database_workload/config"
 	"database_workload/generator"
 	"testing"
+
+	"github.com/dulao5/tidb-multistmt"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -213,5 +217,70 @@ func TestNew_FixPreparedStatementReuseRequiresTxAndPreparedAndNotMulti(t *testin
 				t.Fatalf("expected an error for %s", tc.name)
 			}
 		})
+	}
+}
+
+// unreachableDB returns a *sql.DB whose connections always fail fast, so
+// runSession can be driven up to (and past) acquireConn without a server.
+func unreachableDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("mysql", "root@tcp(127.0.0.1:1)/test?timeout=200ms")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func workerWithConnectionState(t *testing.T, short, fixPrepared bool) (*Worker, *multistmt.PreparedCache) {
+	t.Helper()
+	pc := multistmt.NewPreparedCache(0, 0)
+	w := &Worker{
+		id:                        1,
+		db:                        unreachableDB(t),
+		isShortConn:               short,
+		useTX:                     true,
+		usePrepared:               true,
+		fixPreparedStatementReuse: fixPrepared,
+		connVars:                  map[string]interface{}{"tableNum": int64(7)},
+		stmtCache:                 map[string]*sql.Stmt{"SELECT 1": {}},
+		preparedCache:             pc,
+	}
+	return w, pc
+}
+
+// A short-connection session is a real disconnect + connect: statements
+// prepared on the previous (now closed) connection and "connection"-scoped
+// variables must not carry over. Reusing the old *sql.Stmt is what made
+// short + fix_prepared_statement_reuse (and short + use_prepared_statements
+// without a transaction) fail with "sql: connection is already closed".
+func TestRunSession_ShortConnResetsConnectionScopedState(t *testing.T) {
+	for _, fix := range []bool{false, true} {
+		w, oldPC := workerWithConnectionState(t, true, fix)
+		w.runSession(context.Background()) // acquireConn fails; state must already be reset
+
+		if len(w.stmtCache) != 0 {
+			t.Errorf("fix=%v: stmtCache not reset: %v", fix, w.stmtCache)
+		}
+		if len(w.connVars) != 0 {
+			t.Errorf("fix=%v: connVars not reset: %v", fix, w.connVars)
+		}
+		if w.preparedCache == oldPC {
+			t.Errorf("fix=%v: preparedCache not replaced", fix)
+		}
+	}
+}
+
+func TestRunSession_LongConnKeepsConnectionScopedState(t *testing.T) {
+	for _, fix := range []bool{false, true} {
+		w, oldPC := workerWithConnectionState(t, false, fix)
+		w.runSession(context.Background())
+
+		if _, ok := w.connVars["tableNum"]; !ok {
+			t.Errorf("fix=%v: connVars dropped on a long connection", fix)
+		}
+		if w.preparedCache != oldPC {
+			t.Errorf("fix=%v: preparedCache replaced on a long connection", fix)
+		}
 	}
 }

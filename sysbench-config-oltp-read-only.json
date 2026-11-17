@@ -1,0 +1,136 @@
+{
+  "concurrency": 40,
+  "db_conn_str": "root:@tcp(127.0.0.1:4000)/test?parseTime=true&timeout=3s&readTimeout=3s&writeTimeout=3s",
+  "rate_per_thread": 1,
+  "connection_type": "long",
+  "comment": "like sysbench oltp_read_only: BEGIN, 10 point selects, 4 range selects, COMMIT",
+  "use_transaction": true,
+  "use_prepared_statements": true,
+  "fix_prepared_statement_reuse": true,
+  "templates": [
+    {
+      "sql": "",
+      "comment": "pick one random table (1..100 = sysbench --tables) and keep it for the whole connection",
+      "params": [
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 100,
+          "save_as": "tableNum",
+          "scope": "connection"
+        }
+      ]
+    },
+    {
+      "sql": "SELECT c FROM sbtest? WHERE id = ?",
+      "comment": "10 point selects per transaction",
+      "params": [
+        {
+          "type": "ref",
+          "ref_name": "tableNum",
+          "literal": true
+        },
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 10000
+        }
+      ],
+      "repeat": 10
+    },
+    {
+      "sql": "SELECT c FROM sbtest? WHERE id BETWEEN ? AND ?",
+      "comment": "simple range, range size 100",
+      "params": [
+        {
+          "type": "ref",
+          "ref_name": "tableNum",
+          "literal": true
+        },
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 10000,
+          "save_as": "r1"
+        },
+        {
+          "type": "ref",
+          "ref_name": "r1",
+          "offset": 100
+        }
+      ]
+    },
+    {
+      "sql": "SELECT SUM(k) FROM sbtest? WHERE id BETWEEN ? AND ?",
+      "comment": "sum range",
+      "params": [
+        {
+          "type": "ref",
+          "ref_name": "tableNum",
+          "literal": true
+        },
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 10000,
+          "save_as": "r2"
+        },
+        {
+          "type": "ref",
+          "ref_name": "r2",
+          "offset": 100
+        }
+      ]
+    },
+    {
+      "sql": "SELECT c FROM sbtest? WHERE id BETWEEN ? AND ? ORDER BY c",
+      "comment": "order range",
+      "params": [
+        {
+          "type": "ref",
+          "ref_name": "tableNum",
+          "literal": true
+        },
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 10000,
+          "save_as": "r3"
+        },
+        {
+          "type": "ref",
+          "ref_name": "r3",
+          "offset": 100
+        }
+      ]
+    },
+    {
+      "sql": "SELECT DISTINCT c FROM sbtest? WHERE id BETWEEN ? AND ? ORDER BY c",
+      "comment": "distinct range",
+      "params": [
+        {
+          "type": "ref",
+          "ref_name": "tableNum",
+          "literal": true
+        },
+        {
+          "type": "number",
+          "random_mode": "uniform",
+          "min": 1,
+          "max": 10000,
+          "save_as": "r4"
+        },
+        {
+          "type": "ref",
+          "ref_name": "r4",
+          "offset": 100
+        }
+      ]
+    }
+  ]
+}
