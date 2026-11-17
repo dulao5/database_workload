@@ -13,7 +13,7 @@ What it can simulate:
 
 What it does **not** do:
 
-- **It does not create data.** Create tables and load data first with `sysbench prepare` (or any other tool) — see [section 2](#2-quick-start).
+- **It does not create data.** Create tables and load data first with `sysbench prepare` or [dbgen](https://github.com/kennytm/dbgen) — see [section 2](#2-quick-start).
 - **It does not print QPS / latency.** The log only has start, stop and error lines. Read throughput and latency on the database side (TiDB Dashboard, Grafana, `information_schema.statements_summary`, …).
 
 ---
@@ -89,7 +89,18 @@ If the ranges are larger than the real data, nothing errors — SELECTs just ret
 Why not just `sysbench run`? sysbench only does long connections and only its own way of using prepared statements.
 This tool can switch to short connections, the text protocol, multi-statement, pipelined binary, or a different hotspot distribution, against the same data, so you can compare them.
 
-### 2.3 Command-line flags
+### 2.3 Non-sysbench loads: generate data with dbgen
+
+For your own schemas (not sbtest), [kennytm/dbgen](https://github.com/kennytm/dbgen) is the recommended data generator.
+It produces SQL dumps from a template with a random expression per column — a problem similar to this tool's param generation — so the two work well together:
+
+- **dbgen decides what data is in the tables** (row count, value range and distribution of each column);
+- **this tool decides how the load accesses that data** (which ids, where the hotspots are, how SQL is sent).
+
+Keep the value ranges consistent on both sides: if dbgen generated rows with ids 1..1000000, set the id param's `min` / `max` to 1 and 1000000 here;
+if a column only has a few enum values in dbgen, pick from the same values with `set` here. Otherwise most queries miss and the load no longer means much.
+
+### 2.4 Command-line flags
 
 Just one: `-config <path>`, default `config.json`.
 

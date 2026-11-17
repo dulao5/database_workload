@@ -13,7 +13,7 @@
 
 它**不做**的事：
 
-- **不造数据。** 表和数据请先用 `sysbench prepare`（或别的工具）准备好，见[第 2 节](#2-快速开始)。
+- **不造数据。** 表和数据请先用 `sysbench prepare` 或 [dbgen](https://github.com/kennytm/dbgen) 准备好，见[第 2 节](#2-快速开始)。
 - **不输出 QPS / 延迟统计。** 日志里只有启动、停止和错误。吞吐和延迟请在数据库侧看（TiDB Dashboard、Grafana、`information_schema.statements_summary` 等）。
 
 ---
@@ -89,7 +89,18 @@ sysbench oltp_read_write \
 为什么不直接用 `sysbench run`？因为 sysbench 只能长连接、只能用它自己的 prepared 方式发 SQL；
 而本工具可以换成短连接、文本协议、multi-statement、pipelined binary，或者换一种热点分布，用同一份数据做对比。
 
-### 2.3 命令行参数
+### 2.3 非 sysbench 负载：用 dbgen 造数据
+
+自己的表结构（非 sbtest）推荐用 [kennytm/dbgen](https://github.com/kennytm/dbgen) 造数据。
+它按模板里每一列的随机表达式生成 SQL dump，解决的是和本工具的参数生成类似的问题，两者可以配合使用：
+
+- **dbgen 决定"表里有什么数据"**（行数、每列取值范围和分布）；
+- **本工具决定"负载怎么访问这些数据"**（访问哪些 id、热点在哪、怎么发 SQL）。
+
+配合时注意两边的取值范围要一致：例如 dbgen 生成了 id 为 1..1000000 的行，本工具里 id 参数的 `min` / `max` 就写 1 和 1000000；
+dbgen 里某列只有若干个枚举值，本工具里就用 `set` 从同样的值里挑。否则查询会大量落空，负载就失真了。
+
+### 2.4 命令行参数
 
 只有一个：`-config <path>`，默认 `config.json`。
 
